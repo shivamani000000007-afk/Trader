@@ -1,0 +1,9 @@
+{
+  "name": "stock-picker",
+  "main": "worker.js",
+  "compatibility_date": "2025-01-01",
+  "keep_vars": true,
+  "triggers": {
+    "crons": ["30 10 * * 1-5"]
+  }
+}
