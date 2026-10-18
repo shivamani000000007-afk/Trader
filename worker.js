@@ -1620,8 +1620,10 @@ var ADV_JS = String.raw`
     var c = document.createElement('div');
     c.className = 'card'; c.id = 'adv-card';
     c.innerHTML = '<h2>Pattern advisor: which strategy for this month?</h2>' +
-      '<p class="note">Step 1: the tool describes the market in every past month (regime, candle on an equal-weight index of your list, chart pattern) and notes which strategy did best after each pattern. Step 2: it reads the same patterns for this month and names the strategy that history favors. Step 3: it tests the whole idea walk-forward, choosing each month only from earlier months, against simpler ways of choosing.</p>' +
-      '<div class="fields"><div class="field"><div class="lab"><label for="adv-min">Minimum past months per pattern</label></div><select id="adv-min"><option value="6">6 months</option><option value="8" selected>8 months</option><option value="12">12 months</option></select></div></div>' +
+      '<p class="note">Step 1: the tool describes the market in every past month (regime, candle on an equal-weight index of your list, chart pattern) and notes which strategy did best after each pattern. Step 2: it reads the same patterns for this month and names the strategy that history favors. Step 3: it tests the whole idea walk-forward, choosing each month only from earlier months, against simpler ways of choosing. Step 4: give a past month in Check from (for example Feb 2016) and it shows what it would have advised for that month using only earlier data, and compares that with the strategy that really came out #1.</p>' +
+      '<div class="fields"><div class="field"><div class="lab"><label for="adv-min">Minimum past months per pattern</label></div><select id="adv-min"><option value="6">6 months</option><option value="8" selected>8 months</option><option value="12">12 months</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="adv-from">Check on past dates: from month (blank = all)</label></div><input id="adv-from" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="adv-to">Check to month (blank = latest)</label></div><input id="adv-to" type="month"></div></div>' +
       '<div class="row"><button type="button" class="btn" id="adv-run">Read patterns and advise</button></div>' +
       '<div id="adv-out" class="out"></div>';
     tab.insertBefore(c, out);
@@ -1713,6 +1715,7 @@ var ADV_JS = String.raw`
     var P = PK_CACHE.P, S = PK_CACHE.S;
     if (!P || !S || PK_CACHE.stocks !== PKS.store.stocks) { setOut(errBox('Load your stocks and wait for the picks table to appear, then tap again.')); return; }
     var minN = +el('adv-min').value || 8;
+    var ymv = function (id) { var e = el(id), mm = /^(\d{4})-(\d{2})/.exec(e && e.value || ''); return mm ? (+mm[1]) * 12 + (+mm[2]) - 1 : NaN; };
     var N = Math.round(val('pk-n', 10, 1, 20)), cost = val('pk-cost', 0.25, 0, 5);
     var ex = PK_OPT.exit > 0 ? Math.max(PK_OPT.exit, N + 1) : 0, wts = weightsFor(PK_WM, N);
     var cands = genCands(), recs = [], saveW = PK_W, saveF = PK_FILTOV, total = cands.length * 2, done = 0;
@@ -1729,31 +1732,43 @@ var ADV_JS = String.raw`
       }
       if (!recs.length) { setOut(errBox('Too few months of results. Add stocks with longer history.')); return; }
       var T = recs[0].rows.length; recs = recs.filter(function (r) { return r.rows.length === T; });
-      setOut(render(P, S, recs, N, minN));
+      setOut(render(P, S, recs, N, minN, ymv('adv-from'), ymv('adv-to')));
     } catch (e) {
       setOut(errBox('Something went wrong: ' + e.message));
     } finally { PK_W = saveW; PK_FILTOV = saveF; busy = false; }
   }
 
-  function render(P, S, recs, N, minN) {
+  function render(P, S, recs, N, minN, fromKey, toKey) {
     var M = recs.length, T = recs[0].rows.length, kFirst = recs[0].rows[0].k, X = buildIdx(P, S), t, i, g;
     if (T < 40) return errBox('Only ' + T + ' months of results, too few for this test. Add stocks with longer history.');
     var RET = recs.map(function (r) { return r.rows.map(function (x) { return x.ret; }); }), BEN = recs[0].rows.map(function (x) { return x.bench; });
     var TG = []; for (t = 0; t < T; t++) TG.push(tagsAt(P, S, X, kFirst + t));
-    var sum = TAGS.map(function () { return new Float64Array(M); }), cnt = TAGS.map(function () { return 0; }), sumAll = new Float64Array(M), warm = 24;
-    var ser = { reg: [], candle: [], chart: [], all: [], bsf: [], last: [] }, bens = [];
+    var warm = 24, KEYS = ['reg', 'candle', 'chart', 'all', 'bsf', 'last'];
     var inGrp = function (key) { return function (x) { return key === 'all' || TAGS[x][1] === GRP[key]; }; };
-    for (t = 0; t < T; t++) {
-      if (t >= warm) {
-        bens.push(BEN[t]);
-        ['reg', 'candle', 'chart', 'all'].forEach(function (key) { ser[key].push(RET[pickBy(TG[t].filter(inGrp(key)), sum, cnt, sumAll, minN, M)][t]); });
-        ser.bsf.push(RET[pickBy([], sum, cnt, sumAll, minN, M)][t]);
-        var lb = -1, lv = -Infinity; for (i = 0; i < M; i++) if (RET[i][t - 1] > lv) { lv = RET[i][t - 1]; lb = i; }
-        ser.last.push(RET[lb][t]);
+    var abvOf = function (idx, tt) { var v = RET[idx][tt], a = 0, q; for (q = 0; q < M; q++) if (RET[q][tt] > v) a++; return a; };
+    /* One pass through history. Each month the choice uses only months before it, then that month is added to the record. */
+    function walk(mn) {
+      var sum = TAGS.map(function () { return new Float64Array(M); }), cnt = TAGS.map(function () { return 0; }), sumAll = new Float64Array(M);
+      var ser = {}, bens = [], hist = [], tt, ii;
+      KEYS.forEach(function (key) { ser[key] = []; });
+      for (tt = 0; tt < T; tt++) {
+        if (tt >= warm) {
+          bens.push(BEN[tt]);
+          var pk = {}, pcs = {};
+          ['reg', 'candle', 'chart', 'all'].forEach(function (key) { pk[key] = pickBy(TG[tt].filter(inGrp(key)), sum, cnt, sumAll, mn, M); });
+          pk.bsf = pickBy([], sum, cnt, sumAll, mn, M);
+          var lb = -1, lv = -Infinity; for (ii = 0; ii < M; ii++) if (RET[ii][tt - 1] > lv) { lv = RET[ii][tt - 1]; lb = ii; }
+          pk.last = lb;
+          KEYS.forEach(function (key) { ser[key].push(RET[pk[key]][tt]); pcs[key] = M > 1 ? (M - 1 - abvOf(pk[key], tt)) / (M - 1) : 1; });
+          var ab = 0, av = -Infinity; for (ii = 0; ii < M; ii++) if (RET[ii][tt] > av) { av = RET[ii][tt]; ab = ii; }
+          hist.push({ t: tt, k: kFirst + tt, adv: pk.all, best: ab, abv: abvOf(pk.all, tt), pc: pcs, ret: RET[pk.all][tt], bestRet: av, ben: BEN[tt], use: TG[tt].filter(function (gi) { return cnt[gi] >= mn; }) });
+        }
+        for (ii = 0; ii < M; ii++) { var e = RET[ii][tt] - BEN[tt]; sumAll[ii] += e; TG[tt].forEach(function (gi) { sum[gi][ii] += e; }); }
+        TG[tt].forEach(function (gi) { cnt[gi]++; });
       }
-      for (i = 0; i < M; i++) { var e = RET[i][t] - BEN[t]; sumAll[i] += e; TG[t].forEach(function (gi) { sum[gi][i] += e; }); }
-      TG[t].forEach(function (gi) { cnt[gi]++; });
+      return { sum: sum, cnt: cnt, sumAll: sumAll, ser: ser, bens: bens, hist: hist };
     }
+    var W = walk(minN), sum = W.sum, cnt = W.cnt, sumAll = W.sumAll, ser = W.ser, bens = W.bens;
     var kNow = P.kSig, act = tagsAt(P, S, X, kNow), now = {};
     /* library: best strategy after each pattern, using every past month */
     var lib = TAGS.map(function (tg, gi) {
@@ -1777,6 +1792,73 @@ var ADV_JS = String.raw`
     h += '<div class="scroll"><table class="tbl"><thead><tr><th>Rank</th><th class="wrap">Strategy</th><th>Avg extra a month in matching months</th></tr></thead><tbody>' +
       top.map(function (x, q) { var r = recs[x.i]; return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th>#' + (q + 1) + '</th><td class="wrap">' + nm(r) + '</td><td class="' + tone(x.v) + '">' + pc(x.v, 2, true) + '</td></tr>'; }).join('') + '</tbody></table></div>';
     h += '<p class="note">Tap a row to load that strategy into My own blend. Extra means the gain over the average stock of your list in one month, averaged over past months that had the same patterns.</p>';
+    /* past-date check: advice made from earlier months only, against the strategy that really came out #1 */
+    var mlab = function (key) { return monthLabel(P, key - P.lo); };
+    var firstOut = P.lo + kFirst + warm + 1, lastOut = P.lo + kFirst + T, fk = isFinite(fromKey) ? fromKey : firstOut, early = false;
+    h += '<h3>Check on past dates: advice vs the real #1</h3>';
+    if (fk < firstOut) { early = true; fk = firstOut; }
+    var tk = isFinite(toKey) ? Math.min(toKey, lastOut) : lastOut;
+    if (fk > lastOut) h += errBox('The latest month with a known result is ' + mlab(lastOut) + ', so pick an earlier start month.');
+    else if (tk < fk) h += errBox('The end month must not be before the start month.');
+    else {
+      var inR = function (x) { var m = P.lo + x.k + 1; return m >= fk && m <= tk; }, hs = W.hist.filter(inR), n = hs.length, cmpH = {};
+      var avgPc = function (arr, key) { return mean(arr.map(function (x) { return x.pc[key]; })); };
+      var pa = hs.map(function (x) { return x.pc.all; }), ma = mean(pa), sdA = sdev(pa), tA = n > 5 && sdA > 0 ? (ma - 0.5) / (sdA / Math.sqrt(n)) : NaN;
+      var dB = hs.map(function (x) { return x.pc.all - x.pc.bsf; }), mB = mean(dB), sdB = sdev(dB), tB = n > 5 && sdB > 0 ? mB / (sdB / Math.sqrt(n)) : NaN;
+      var top10 = hs.filter(function (x) { return x.pc.all >= 0.9; }).length, top25 = hs.filter(function (x) { return x.pc.all >= 0.75; }).length, exact = hs.filter(function (x) { return x.abv === 0; }).length;
+      var beatL = hs.filter(function (x) { return x.ret > x.ben; }).length, f0 = hs[0];
+      if (early) h += '<p class="note">Your start month is earlier than the first month that can be checked fairly. The tool needs ' + warm + ' months of earlier history first, so the check starts at ' + esc(mlab(fk)) + '.</p>';
+      h += '<p class="headline">As of the end of <b>' + esc(monthLabel(P, f0.k)) + '</b>, using only earlier data, it advised <b>' + nm(recs[f0.adv]) + '</b> for ' + esc(monthLabel(P, f0.k + 1)) + '. The real #1 that month was <b>' + nm(recs[f0.best]) + '</b> (' + pc(f0.bestRet, 1, true) + '). The advised one made ' + pc(f0.ret, 1, true) + ' and ranked ' + (f0.abv + 1) + ' of ' + M + ' strategies.</p>';
+      var vd;
+      if (n < 12) vd = 'Only ' + n + ' months in this range, too few to judge. Use an earlier start month.';
+      else if (tA >= 2 && ma > 0.5) vd = 'Over ' + n + ' months the advised strategy typically beat ' + Math.round(ma * 100) + '% of all strategies (random choosing gives 50%), by more than luck would explain (strength ' + num(tA, 2) + ').';
+      else if (tA <= -2 && ma < 0.5) vd = 'Over ' + n + ' months the advised strategy typically beat only ' + Math.round(ma * 100) + '% of all strategies, clearly worse than random choosing (strength ' + num(tA, 2) + '). Do not rely on it.';
+      else vd = 'Over ' + n + ' months the advised strategy typically beat ' + Math.round(ma * 100) + '% of all strategies. That is within what luck gives against 50% for random choosing (strength ' + num(tA, 2) + ').';
+      h += '<p class="note"><b>' + vd + '</b> ' + (n >= 12 ? (tB >= 2 && mB > 0 ? 'It also did better than simply using the best strategy so far.' : (tB <= -2 && mB < 0 ? 'It did clearly worse than simply using the best strategy so far.' : 'It made no clear difference against simply using the best strategy so far.')) : '') + '</p>';
+      h += '<div class="tiles">' +
+        '<div class="tile"><span class="tl">Typical rank of advised strategy</span><span class="tv ' + (ma > 0.5 ? 'good' : 'bad') + '">' + pc(ma, 0) + '</span><span class="ts">50% = random choosing</span></div>' +
+        '<div class="tile"><span class="tl">Months in the top 10%</span><span class="tv">' + top10 + ' of ' + n + '</span><span class="ts">random gives about ' + Math.round(n * 0.1) + '</span></div>' +
+        '<div class="tile"><span class="tl">Months in the top 25%</span><span class="tv">' + top25 + ' of ' + n + '</span><span class="ts">random gives about ' + Math.round(n * 0.25) + '</span></div>' +
+        '<div class="tile"><span class="tl">Months it picked the exact #1</span><span class="tv">' + exact + ' of ' + n + '</span><span class="ts">random gives about ' + (n / M).toFixed(1) + '</span></div>' +
+        '<div class="tile"><span class="tl">Months it beat the list</span><span class="tv ' + (beatL / n >= 0.5 ? 'good' : 'bad') + '">' + pc(beatL / n, 0) + '</span><span class="ts">' + beatL + ' of ' + n + '</span></div></div>';
+      /* compounded over the range: advisor against every fixed strategy */
+      var eqA = 1, eqL = 1, eqB = 1, eqLast = 1, eqS = new Array(M).fill(1), qq, hh;
+      for (hh = 0; hh < n; hh++) { var tt2 = hs[hh].t; eqA *= 1 + hs[hh].ret; eqL *= 1 + hs[hh].ben; eqB *= 1 + W.ser.bsf[tt2 - warm]; eqLast *= 1 + W.ser.last[tt2 - warm]; for (qq = 0; qq < M; qq++) eqS[qq] *= 1 + RET[qq][tt2]; }
+      var bi = 0, aboveA = 0; for (qq = 0; qq < M; qq++) { if (eqS[qq] > eqS[bi]) bi = qq; if (eqS[qq] > eqA) aboveA++; }
+      var cg = function (e) { return Math.pow(e, 12 / n) - 1; };
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Over ' + esc(mlab(fk)) + ' to ' + esc(mlab(tk)) + '</th><th>Yearly growth</th></tr></thead><tbody>' +
+        '<tr><th class="wrap">Advisor, changing strategy every month</th><td class="' + tone(cg(eqA)) + '">' + pc(cg(eqA), 1, true) + '</td></tr>' +
+        '<tr><th class="wrap">Best strategy so far, no patterns</th><td class="' + tone(cg(eqB)) + '">' + pc(cg(eqB), 1, true) + '</td></tr>' +
+        '<tr><th class="wrap">Last month winner</th><td class="' + tone(cg(eqLast)) + '">' + pc(cg(eqLast), 1, true) + '</td></tr>' +
+        '<tr><th class="wrap">Average stock of your list</th><td class="' + tone(cg(eqL)) + '">' + pc(cg(eqL), 1, true) + '</td></tr>' +
+        '<tr><th class="wrap">Real #1 single strategy (known only afterwards): ' + nm(recs[bi]) + '</th><td class="' + tone(cg(eqS[bi])) + '">' + pc(cg(eqS[bi]), 1, true) + '</td></tr></tbody></table></div>';
+      h += '<p class="note">The advisor beat ' + (M - aboveA) + ' of ' + M + ' strategies that were simply held for the whole period. The real #1 is the best of ' + M + ' tries picked with hindsight, so no method can be expected to match it. Judge the advisor by the typical rank and by how often it beat the list.</p>';
+      /* which way of choosing ranked best on these dates */
+      var ways = [['all', 'Patterns: all three kinds'], ['reg', 'Regime patterns only'], ['candle', 'Candle patterns only'], ['chart', 'Chart patterns only'], ['bsf', 'Best strategy so far (no patterns)'], ['last', 'Last month winner']];
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Way of choosing (these dates)</th><th>Typical rank</th></tr></thead><tbody>' +
+        ways.map(function (w) { var v = avgPc(hs, w[0]); return '<tr><th class="wrap">' + w[1] + '</th><td class="' + (v > 0.5 ? 'good' : 'bad') + '">' + pc(v, 0) + '</td></tr>'; }).join('') + '</tbody></table></div>';
+      /* which minimum-months setting checked best on these dates */
+      var mins = [6, 8, 12, 18];
+      if (mins.indexOf(minN) < 0) mins.push(minN);
+      mins.sort(function (a, b) { return a - b; });
+      var mrows = mins.map(function (mn) { var Wk = mn === minN ? W : walk(mn), hk = Wk.hist.filter(inR); return { mn: mn, n: hk.length, v: hk.length ? avgPc(hk, 'all') : NaN, beat: hk.length ? hk.filter(function (x) { return x.ret > x.ben; }).length / hk.length : NaN }; });
+      var bm = mrows[0]; mrows.forEach(function (r) { if (r.v > bm.v) bm = r; });
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Minimum past months per pattern</th><th>Typical rank</th><th>Beat list</th></tr></thead><tbody>' +
+        mrows.map(function (r) { return '<tr class="' + (r.mn === minN ? 'on' : '') + '"><th class="wrap">' + (r === bm ? '● ' : '') + r.mn + ' months' + (r.mn === minN ? ' (selected)' : '') + '</th><td class="' + (r.v > 0.5 ? 'good' : 'bad') + '">' + pc(r.v, 0) + '</td><td>' + pc(r.beat, 0) + '</td></tr>'; }).join('') + '</tbody></table></div>';
+      h += '<p class="note">' + (bm.mn === minN ? 'Your selected setting checked best on these dates.' : 'On these dates ' + bm.mn + ' months checked best. Change the setting above and run again to use it.') + ' Different dates may favor a different setting, so try a few start months before trusting one.</p>';
+      /* by year */
+      var by = {}; hs.forEach(function (x) { var y = Math.floor((P.lo + x.k + 1) / 12), o = by[y] || (by[y] = { y: y, n: 0, s: 0, b: 0 }); o.n++; o.s += x.pc.all; if (x.ret > x.ben) o.b++; });
+      var yl = Object.keys(by).sort().map(function (y) { return by[y]; });
+      if (yl.length > 1) h += '<div class="scroll"><table class="tbl"><thead><tr><th>Year</th><th>Months</th><th>Typical rank</th><th>Beat list</th></tr></thead><tbody>' +
+        yl.map(function (o) { return '<tr><th>' + o.y + '</th><td>' + o.n + '</td><td class="' + (o.s / o.n > 0.5 ? 'good' : 'bad') + '">' + pc(o.s / o.n, 0) + '</td><td>' + o.b + ' (' + pc(o.b / o.n, 0) + ')</td></tr>'; }).join('') + '</tbody></table></div>';
+      /* month by month */
+      var cap = 36, shown = hs.slice(0, cap);
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th>Month</th><th class="wrap">Patterns used</th><th class="wrap">Advised</th><th>Result</th><th class="wrap">Real #1 that month</th><th>Rank</th><th>Beat list?</th></tr></thead><tbody>' +
+        shown.map(function (x) {
+          return '<tr><th>' + esc(monthLabel(P, x.k + 1)) + '</th><td class="wrap">' + (x.use.length ? x.use.map(function (gi) { return esc(TAGS[gi][0]); }).join(', ') : 'none, all months') + '</td><td class="wrap">' + nm(recs[x.adv]) + '</td><td class="' + tone(x.ret) + '">' + pc(x.ret, 1, true) + '</td><td class="wrap">' + nm(recs[x.best]) + ' ' + pc(x.bestRet, 1, true) + '</td><td>' + (x.abv + 1) + ' of ' + M + '</td><td class="' + (x.ret > x.ben ? 'good' : 'bad') + '">' + (x.ret > x.ben ? 'Yes' : 'No') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+      h += '<p class="note">' + (hs.length > cap ? 'Showing the first ' + cap + ' of ' + hs.length + ' months, the totals above cover all of them. ' : '') + 'Each month the advice uses only months that had already finished, so nothing peeks ahead. Rank 1 means the advised strategy was the real #1 that month. With ' + M + ' strategies, even the real #1 each month is partly luck, so a single month proves little. Look at the typical rank over many months. Your stock list holds today survivors, which flatters old months. Not investment advice.</p>';
+    }
     /* walk-forward verdict */
     var P1 = {}; ['reg', 'candle', 'chart', 'all', 'bsf', 'last'].forEach(function (k2) { P1[k2] = perf(ser[k2], bens); });
     var cmp = pairT(ser.all, ser.bsf), verdict;
@@ -1785,10 +1867,10 @@ var ADV_JS = String.raw`
     else verdict = 'Choosing by patterns made no clear difference against simply using the best strategy so far (strength ' + num(cmp.t, 2) + '). Treat the advice above as a hint, not a rule.';
     h += '<h3>Does it work? Walk-forward check</h3><p class="headline">' + esc(verdict) + '</p>';
     var names = [['all', 'Patterns: all three kinds'], ['reg', 'Regime patterns only'], ['candle', 'Candle patterns only'], ['chart', 'Chart patterns only'], ['bsf', 'Best strategy so far (no patterns)'], ['last', 'Last month winner']];
-    h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Way of choosing</th><th>Months</th><th>Avg extra a month</th><th>Months beating list</th><th>Yearly growth (list)</th><th>Worst fall (list)</th><th>Against best so far</th></tr></thead><tbody>' +
+    h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Way of choosing</th><th>Months</th><th>Avg extra a month</th><th>Months beating list</th><th>Yearly growth (list)</th><th>Worst fall (list)</th><th>Against best so far</th><th>Typical rank</th></tr></thead><tbody>' +
       names.map(function (x) {
         var p = P1[x[0]], c2 = pairT(ser[x[0]], ser.bsf);
-        return '<tr><th class="wrap">' + x[1] + '</th><td>' + p.n + '</td><td class="' + tone(p.ex) + '">' + pc(p.ex, 2, true) + '</td><td>' + pc(p.hit, 0) + '</td><td><span class="' + tone(p.cagr) + '">' + pc(p.cagr, 1, true) + '</span> (' + pc(p.bcagr, 1, true) + ')</td><td><span class="bad">' + pc(p.dd, 0) + '</span> (' + pc(p.bdd, 0) + ')</td><td>' + (x[0] === 'bsf' ? '-' : num(c2.t, 2)) + '</td></tr>';
+        return '<tr><th class="wrap">' + x[1] + '</th><td>' + p.n + '</td><td class="' + tone(p.ex) + '">' + pc(p.ex, 2, true) + '</td><td>' + pc(p.hit, 0) + '</td><td><span class="' + tone(p.cagr) + '">' + pc(p.cagr, 1, true) + '</span> (' + pc(p.bcagr, 1, true) + ')</td><td><span class="bad">' + pc(p.dd, 0) + '</span> (' + pc(p.bdd, 0) + ')</td><td>' + (x[0] === 'bsf' ? '-' : num(c2.t, 2)) + '</td><td>' + pc(mean(W.hist.map(function (q) { return q.pc[x[0]]; })), 0) + '</td></tr>';
       }).join('') + '</tbody></table></div>';
     h += '<p class="note">Each month the choice uses only months that had already finished, starting after ' + warm + ' months of history. Against best so far shows the strength of the gap between that way of choosing and the best-so-far row. Above 2 is a real edge, below -2 is clearly worse, in between is within luck.</p>';
     /* library */
