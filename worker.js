@@ -2120,6 +2120,67 @@ var ADV_JS = String.raw`
         h += '<h3>Auto advisor, window after window</h3>' + tb(['Window', 'Advisor picked', 'Its rank', 'Its growth', 'Real #1', 'Real #1 growth'], ar);
         h += '<p class="note">Last ' + ap.length + ' separate windows, one after another. The advisor choice for each window used only earlier windows.</p>';
       } else h += '<p class="note">Not enough finished windows to test.</p>';
+      /* 2c. Monthly accuracy: one pick per month from earlier months only, scored three ways */
+      var S = C.S, MW = 24, XX = buildIdx(P, S), TGm = [], tm, RETm = recs.map(function (r) { return r.rows.map(function (x) { return x.ret; }); }), BENm = recs[0].rows.map(function (x) { return x.bench; });
+      for (tm = 0; tm < T; tm++) TGm.push(tagsAt(P, S, XX, kFirst + tm));
+      var IND = [[], [], []], BEST1 = new Int32Array(T), beatFrac = 0, beatN = 0;
+      for (tm = 0; tm < T; tm++) {
+        var ordm = [], posm = new Int32Array(M), a0 = new Uint8Array(M), a1 = new Uint8Array(M), a2 = new Uint8Array(M), nb = 0;
+        for (i = 0; i < M; i++) ordm.push(i);
+        ordm.sort(function (x, y) { return (RETm[y][tm] - RETm[x][tm]) || (x - y); });
+        for (i = 0; i < M; i++) posm[ordm[i]] = i;
+        BEST1[tm] = ordm[0];
+        for (i = 0; i < M; i++) { a0[i] = RETm[i][tm] > BENm[tm] ? 1 : 0; a1[i] = posm[i] < t25n ? 1 : 0; a2[i] = posm[i] < t10n ? 1 : 0; nb += a0[i]; }
+        IND[0].push(a0); IND[1].push(a1); IND[2].push(a2);
+        if (tm >= MW) { beatFrac += nb / M; beatN++; }
+      }
+      var NTG = TAGS.length, cntT = new Float64Array(NTG), cntAll = 0, hitT = [0, 1, 2].map(function () { var a = []; for (var g = 0; g < NTG; g++) a.push(new Float64Array(M)); return a; }), hitAll = [0, 1, 2].map(function () { return new Float64Array(M); });
+      var MSN = ['Always 12m +100 and 6m +100 (fixed)', 'Always 12m +100 (fixed)', 'Repeat last month #1', 'Best record so far, no market reading', 'Regime advisor tuned to beat the list', 'Regime advisor tuned to top 25%', 'Regime advisor tuned to top 10%'];
+      var HS = MSN.map(function () { return [[], [], []]; }), MEX = MSN.map(function () { return []; });
+      for (tm = 0; tm < T; tm++) {
+        if (tm >= MW) {
+          var pkm = [fxA, fxB, BEST1[tm - 1], 0, 0, 0, 0], actm = TGm[tm].filter(function (g) { return cntT[g] >= 6; }), dd2, bi2, bv2, ov2, v2, b3 = 0;
+          for (i = 1; i < M; i++) if (hitAll[0][i] > hitAll[0][b3]) b3 = i;
+          pkm[3] = b3;
+          for (dd2 = 0; dd2 < 3; dd2++) {
+            bi2 = 0; bv2 = -Infinity; ov2 = -Infinity;
+            for (i = 0; i < M; i++) {
+              if (!actm.length) v2 = hitAll[dd2][i] / cntAll;
+              else { v2 = 0; actm.forEach(function (g) { v2 += hitT[dd2][g][i] / cntT[g]; }); v2 /= actm.length; }
+              if (v2 > bv2 || (v2 === bv2 && hitAll[dd2][i] > ov2)) { bv2 = v2; ov2 = hitAll[dd2][i]; bi2 = i; }
+            }
+            pkm[4 + dd2] = bi2;
+          }
+          pkm.forEach(function (pi3, j) {
+            if (pi3 < 0) return;
+            for (var e = 0; e < 3; e++) HS[j][e].push(IND[e][tm][pi3]);
+            MEX[j].push(RETm[pi3][tm] - BENm[tm]);
+          });
+        }
+        cntAll++;
+        TGm[tm].forEach(function (g) { cntT[g]++; });
+        for (var e2 = 0; e2 < 3; e2++) for (i = 0; i < M; i++) { var iv = IND[e2][tm][i]; if (iv) { hitAll[e2][i]++; TGm[tm].forEach(function (g) { hitT[e2][g][i]++; }); } }
+      }
+      var stretch = function (arr) { var n = arr.length, ok = 0, tt2 = 0, a, q2, sm; for (a = 0; a + 10 <= n; a++) { sm = 0; for (q2 = a; q2 < a + 10; q2++) sm += arr[q2]; tt2++; if (sm >= 8) ok++; } return tt2 ? ok / tt2 : NaN; };
+      var rate = function (arr) { return arr.length ? arr.reduce(function (x, y) { return x + y; }, 0) / arr.length : NaN; };
+      var best3 = [-1, -1, -1], bestR = [-1, -1, -1], accRows = [], strRows = [];
+      HS.forEach(function (hs, j) {
+        if (!hs[0].length) return;
+        var r3 = hs.map(rate);
+        if (j >= 3) { for (var e3 = 0; e3 < 3; e3++) if (r3[e3] > bestR[e3]) { bestR[e3] = r3[e3]; best3[e3] = j; } }
+        accRows.push('<tr class="' + (j >= 4 ? 'on' : '') + '"><th class="wrap">' + esc(MSN[j]) + '</th><td>' + pc(r3[0], 0) + '</td><td>' + pc(r3[1], 0) + '</td><td>' + pc(r3[2], 0) + '</td><td class="' + tone(mean(MEX[j])) + '">' + pc(mean(MEX[j]), 2, true) + '</td></tr>');
+        strRows.push('<tr><th class="wrap">' + esc(MSN[j]) + '</th><td>' + pc(stretch(hs[0]), 0) + '</td><td>' + pc(stretch(hs[1]), 0) + '</td><td>' + pc(stretch(hs[2]), 0) + '</td></tr>');
+      });
+      var nm2 = HS[0][0].length || (HS[4][0] || []).length;
+      accRows.push('<tr><th class="wrap">Random strategy (chance)</th><td>' + pc(beatN ? beatFrac / beatN : NaN, 0) + '</td><td>25%</td><td>10%</td><td>-</td></tr>');
+      h += '<h3>Monthly accuracy: how often is the monthly pick a hit?</h3>';
+      var hit80 = [], lbl3 = ['beat the list', 'top 25%', 'top 10%'];
+      for (i = 0; i < 3; i++) if (best3[i] >= 0 && bestR[i] >= 0.8) hit80.push(lbl3[i]);
+      h += '<p class="headline">Best monthly hit rates using only earlier months: beat the list <b>' + pc(bestR[0], 0) + '</b>, top 25% <b>' + pc(bestR[1], 0) + '</b>, top 10% <b>' + pc(bestR[2], 0) + '</b> (regime advisors). ' + (hit80.length ? 'The 80% target was reached for: ' + hit80.join(', ') + '.' : 'None reached 80%.') + '</p>';
+      h += tb(['How the strategy is chosen (earlier months only)', 'Beat the list', 'Top 25%', 'Top 10%', 'Average extra a month'], accRows);
+      h += '<h3>The 8 out of 10 test</h3>';
+      h += tb(['How the strategy is chosen', 'Beat the list: share of 10-month stretches with 8+ hits', 'Top 25%: same', 'Top 10%: same'], strRows);
+      h += '<p class="note">' + (HS[4][0] || []).length + ' months tested, one pick each, starting after ' + MW + ' months of history. A hit is a month where the pick beat the list average, or was among the best 25% or 10% of all ' + M + ' strategies that month. The regime advisors read the market that month (trend, breadth, candle and chart patterns), look at past months with the same pattern, and pick the strategy that most often scored a hit in them. Each month is added to the record only after it is scored. Fixed rows learn nothing. The 8 out of 10 table counts every 10-month stretch, overlapping. Your stock list holds today survivors, so hit rates look better than real time would have given.</p>';
       /* 3. window by window */
       var wrows = [], cap = 40, showS = [];
       for (s = 0; s < nW; s += Ln) showS.push(s);
