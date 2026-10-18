@@ -2265,6 +2265,45 @@ var ADV_JS = String.raw`
         h += tb(['Test', 'Yearly growth', 'List', 'Ahead per year', 'Worst fall', 'List fall', 'Months beat list', 'Months'], fairRows);
         h += '<p class="note">Growth is compounded month by month with trading costs, stop loss and exit rank from your settings. The first half and second half rows show whether the edge appears in both parts of history. The last row is the honest one: it does not know in advance that 12m +100 and 6m +100 would win, it just holds whichever strategy had grown most up to the previous month. If it is far behind the fixed rule, part of the fixed rule result is hindsight. Your stock list holds today survivors, which flatters long-term momentum. Not investment advice.</p>';
       } else h += '<p class="note">The fixed 12m +100 and 6m +100 strategy was not found, so this test could not run.</p>';
+      /* 2f. Fall protection test: each 12-month window, hold last window's smallest-fall winner (one that beat the list), against the fixed rule and a 50/50 blend */
+      var DH = 12, dfRows = [];
+      var winDD = function (ser, a, b) { var e7 = 1, p7 = 1, d7 = 0, t7; for (t7 = a; t7 < b; t7++) { e7 *= 1 + ser[t7]; if (e7 > p7) p7 = e7; if (e7 / p7 - 1 < d7) d7 = e7 / p7 - 1; } return d7; };
+      var winG = function (ser, a, b) { var e8 = 1, t8; for (t8 = a; t8 < b; t8++) e8 *= 1 + ser[t8]; return e8 - 1; };
+      if (fxA >= 0 && T >= DH * 3) {
+        var ACC = { list: [], fix: [], def: [], mix: [] }, nFall = 0, sd2, ii3, bd3, bdv, bgv, lgp, gp, ddp, fallback = 0;
+        for (sd2 = DH; sd2 + DH <= T; sd2++) {
+          lgp = winG(BENm, sd2 - DH, sd2); bd3 = -1; bdv = -Infinity; bgv = -Infinity;
+          for (ii3 = 0; ii3 < M; ii3++) {
+            gp = winG(RETm[ii3], sd2 - DH, sd2);
+            if (gp <= lgp) continue;
+            ddp = winDD(RETm[ii3], sd2 - DH, sd2);
+            if (ddp > bdv || (ddp === bdv && gp > bgv)) { bdv = ddp; bgv = gp; bd3 = ii3; }
+          }
+          if (bd3 < 0) { bd3 = fxA; fallback++; }
+          var mixS = [], q9;
+          for (q9 = sd2; q9 < sd2 + DH; q9++) mixS.push(0.5 * RETm[fxA][q9] + 0.5 * RETm[bd3][q9]);
+          var lgn = winG(BENm, sd2, sd2 + DH), ldn = winDD(BENm, sd2, sd2 + DH);
+          [['list', BENm], ['fix', RETm[fxA]], ['def', RETm[bd3]], ['mix', mixS]].forEach(function (pr) {
+            var ser = pr[1], off2 = pr[0] === 'mix' ? sd2 : 0;
+            var a9 = pr[0] === 'mix' ? 0 : sd2, b9 = pr[0] === 'mix' ? DH : sd2 + DH, gg9 = winG(ser, a9, b9), dd9 = winDD(ser, a9, b9);
+            ACC[pr[0]].push({ g: gg9, d: dd9, beat: gg9 > lgn, small: dd9 > ldn });
+          });
+          nFall++;
+        }
+        var dfLab = { list: 'Average stock in your list', fix: 'Fixed rule (12m +100 and 6m +100)', def: 'Last window smallest-fall winner (beat the list, smallest fall)', mix: '50% fixed rule + 50% smallest-fall winner' };
+        ['list', 'fix', 'def', 'mix'].forEach(function (k) {
+          var A = ACC[k], n9 = A.length;
+          if (!n9) return;
+          var gs = A.map(function (x) { return x.g; }), ds = A.map(function (x) { return x.d; });
+          var bt = A.filter(function (x) { return x.beat; }).length, sm = A.filter(function (x) { return x.small; }).length, bo = A.filter(function (x) { return x.beat && x.small; }).length;
+          dfRows.push('<tr class="' + (k === 'mix' ? 'on' : '') + '"><th class="wrap">' + esc(dfLab[k]) + '</th><td class="' + tone(mean(gs)) + '">' + pc(mean(gs), 1, true) + '</td><td class="bad">' + pc(mean(ds), 0) + '</td><td class="bad">' + pc(Math.min.apply(null, ds), 0) + '</td><td>' + (k === 'list' ? '-' : pc(bt / n9, 0)) + '</td><td>' + (k === 'list' ? '-' : pc(sm / n9, 0)) + '</td><td>' + (k === 'list' ? '-' : pc(bo / n9, 0)) + '</td><td>' + n9 + '</td></tr>');
+        });
+      }
+      h += '<h3>Fall protection test: does last window smallest-fall winner keep the fall small?</h3>';
+      if (dfRows.length) {
+        h += tb(['Method (12-month windows, every start month)', 'Average growth', 'Average worst fall', 'Deepest fall in any window', 'Beat the list', 'Smaller fall than list', 'Both', 'Windows'], dfRows);
+        h += '<p class="note">For every start month, the smallest-fall winner is found on the 12 months just before (among strategies that beat the list there, the one with the smallest worst fall), then held for the next 12 months. That is the same ranking as the option that sorts by smallest fall, but chosen only from earlier months. The blend splits money half and half and rebalances monthly. Compare Both against the fixed rule: if the smallest-fall pick does not keep a smaller fall in the next window, that ranking only describes the past. Windows overlap, so treat rates as a guide. Your stock list holds today survivors. Not investment advice.</p>';
+      } else h += '<p class="note">Not enough months for this test.</p>';
       /* 3. window by window */
       var wrows = [], cap = 40, showS = [];
       for (s = 0; s < nW; s += Ln) showS.push(s);
