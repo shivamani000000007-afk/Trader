@@ -2231,6 +2231,40 @@ var ADV_JS = String.raw`
         h += tb(['Holding length and method', 'Beat the list', 'Top 25%', 'Top 10%', '8+ of 10 periods: beat', '8+ of 10 periods: top 25%', 'Windows tested'], hzRows);
         h += '<p class="note">Each row picks one strategy per window, using only windows that had already finished, and holds it for that length. A hit is a window where the pick beat the list average, or finished among the best 25% or 10% of all ' + M + ' strategies in that window. 8+ of 10 periods looks at every run of 10 separate (non-overlapping) windows and shows how often 8 or more were hits. Windows overlap, so rates are a guide, and longer holds have far fewer separate windows. Daily holding cannot be tested: your prices are monthly, so the shortest test is 1 month. Your stock list holds today survivors, which flatters long-term momentum.</p>';
       } else h += '<p class="note">Not enough months to test holding lengths.</p>';
+      /* 2e. Fair test of the fixed rule: early and late halves, choice from earlier data only, growth, worst fall, costs included */
+      var fgs = function (a, b) {
+        var n6 = a.length;
+        if (n6 < 12) return null;
+        var e6 = 1, b6 = 1, p6 = 1, q6 = 1, d6 = 0, f6 = 0, w6 = 0, t6;
+        for (t6 = 0; t6 < n6; t6++) { e6 *= 1 + a[t6]; b6 *= 1 + b[t6]; p6 = Math.max(p6, e6); q6 = Math.max(q6, b6); d6 = Math.min(d6, e6 / p6 - 1); f6 = Math.min(f6, b6 / q6 - 1); if (a[t6] > b[t6]) w6++; }
+        return { n: n6, g: Math.pow(e6, 12 / n6) - 1, bg: Math.pow(b6, 12 / n6) - 1, dd: d6, bdd: f6, win: w6 / n6 };
+      };
+      var fairRows = [], fairHead = '';
+      if (fxA >= 0) {
+        var FS = RETm[fxA], half = Math.floor(T / 2), wfR = [], wfB = [], wfF = [], tw2, bw2, vw2;
+        for (tw2 = MW; tw2 < T; tw2++) {
+          bw2 = 0; vw2 = -Infinity;
+          for (i = 0; i < M; i++) if (PL[i][tw2] > vw2) { vw2 = PL[i][tw2]; bw2 = i; }
+          wfR.push(RETm[bw2][tw2]); wfB.push(BENm[tw2]); wfF.push(FS[tw2]);
+        }
+        var fRow = function (label, st, hl) {
+          if (!st) return;
+          fairRows.push('<tr class="' + (hl ? 'on' : '') + '"><th class="wrap">' + esc(label) + '</th><td class="' + tone(st.g) + '">' + pc(st.g, 1, true) + '</td><td>' + pc(st.bg, 1, true) + '</td><td class="' + tone(st.g - st.bg) + '">' + pc(st.g - st.bg, 1, true) + '</td><td class="bad">' + pc(st.dd, 0) + '</td><td>' + pc(st.bdd, 0) + '</td><td>' + pc(st.win, 0) + '</td><td>' + st.n + '</td></tr>');
+        };
+        var sAll = fgs(FS, BENm), sH1 = fgs(FS.slice(0, half), BENm.slice(0, half)), sH2 = fgs(FS.slice(half), BENm.slice(half)), sSame = fgs(wfF, wfB), sWf = fgs(wfR, wfB);
+        fRow('Fixed rule, all months', sAll, false);
+        fRow('Fixed rule, first half of history', sH1, false);
+        fRow('Fixed rule, second half of history', sH2, false);
+        fRow('Fixed rule, same months as the next row', sSame, false);
+        fRow('Best-growth-so-far pick, chosen from earlier months only', sWf, true);
+        if (sAll) fairHead = 'The fixed rule (12m +100 and 6m +100, costs included) grew <b>' + pc(sAll.g, 1, true) + '</b> a year against the list <b>' + pc(sAll.bg, 1, true) + '</b>, ahead by <b>' + pc(sAll.g - sAll.bg, 1, true) + '</b> a year, with a worst fall of ' + pc(sAll.dd, 0) + ' against ' + pc(sAll.bdd, 0) + '. ' + (sWf ? 'When the rule is not known in advance and each month uses the best-growth strategy from earlier months only, it was ahead by <b>' + pc(sWf.g - sWf.bg, 1, true) + '</b> a year.' : '') + (sH1 && sH2 ? ' First half ahead by ' + pc(sH1.g - sH1.bg, 1, true) + ', second half by ' + pc(sH2.g - sH2.bg, 1, true) + '.' : '');
+      }
+      h += '<h3>Fair test of the fixed rule: how far ahead of the list?</h3>';
+      if (fairRows.length) {
+        h += '<p class="headline">' + fairHead + '</p>';
+        h += tb(['Test', 'Yearly growth', 'List', 'Ahead per year', 'Worst fall', 'List fall', 'Months beat list', 'Months'], fairRows);
+        h += '<p class="note">Growth is compounded month by month with trading costs, stop loss and exit rank from your settings. The first half and second half rows show whether the edge appears in both parts of history. The last row is the honest one: it does not know in advance that 12m +100 and 6m +100 would win, it just holds whichever strategy had grown most up to the previous month. If it is far behind the fixed rule, part of the fixed rule result is hindsight. Your stock list holds today survivors, which flatters long-term momentum. Not investment advice.</p>';
+      } else h += '<p class="note">The fixed 12m +100 and 6m +100 strategy was not found, so this test could not run.</p>';
       /* 3. window by window */
       var wrows = [], cap = 40, showS = [];
       for (s = 0; s < nW; s += Ln) showS.push(s);
