@@ -2181,6 +2181,56 @@ var ADV_JS = String.raw`
       h += '<h3>The 8 out of 10 test</h3>';
       h += tb(['How the strategy is chosen', 'Beat the list: share of 10-month stretches with 8+ hits', 'Top 25%: same', 'Top 10%: same'], strRows);
       h += '<p class="note">' + (HS[4][0] || []).length + ' months tested, one pick each, starting after ' + MW + ' months of history. A hit is a month where the pick beat the list average, or was among the best 25% or 10% of all ' + M + ' strategies that month. The regime advisors read the market that month (trend, breadth, candle and chart patterns), look at past months with the same pattern, and pick the strategy that most often scored a hit in them. Each month is added to the record only after it is scored. Fixed rows learn nothing. The 8 out of 10 table counts every 10-month stretch, overlapping. Your stock list holds today survivors, so hit rates look better than real time would have given.</p>';
+      /* 2d. Every holding length: 1, 3, 6, 12 and 24 months, one pick per window from earlier windows only */
+      var HZ = [1, 3, 6, 12, 24], hzRows = [], hzOk = [], hzUsed = 0;
+      var hzStretch = function (arr, step) { var tt3 = 0, ok3 = 0, o3, k3, sub, a3, q3, sm3; for (o3 = 0; o3 < step; o3++) { sub = arr.filter(function (x, k) { return k % step === o3; }); for (a3 = 0; a3 + 10 <= sub.length; a3++) { sm3 = 0; for (q3 = a3; q3 < a3 + 10; q3++) sm3 += sub[q3]; tt3++; if (sm3 >= 8) ok3++; } } return tt3 ? ok3 / tt3 : NaN; };
+      var hzRate = function (arr) { return arr.length ? arr.reduce(function (x, y) { return x + y; }, 0) / arr.length : NaN; };
+      HZ.forEach(function (hh) {
+        var NW = T - hh + 1;
+        if (NW < 40) return;
+        var indH = [[], [], []], w2, ii2, e4;
+        for (w2 = 0; w2 < NW; w2++) {
+          var gv = new Float64Array(M), od = [], ps2 = new Int32Array(M), b0 = new Uint8Array(M), b1 = new Uint8Array(M), b2 = new Uint8Array(M), lg = Math.exp(BL[w2 + hh] - BL[w2]) - 1;
+          for (ii2 = 0; ii2 < M; ii2++) { gv[ii2] = PL[ii2][w2 + hh] - PL[ii2][w2]; od.push(ii2); }
+          od.sort(function (x, y) { return (gv[y] - gv[x]) || (x - y); });
+          for (ii2 = 0; ii2 < M; ii2++) ps2[od[ii2]] = ii2;
+          for (ii2 = 0; ii2 < M; ii2++) { b0[ii2] = (Math.exp(gv[ii2]) - 1) > lg ? 1 : 0; b1[ii2] = ps2[ii2] < t25n ? 1 : 0; b2[ii2] = ps2[ii2] < t10n ? 1 : 0; }
+          indH[0].push(b0); indH[1].push(b1); indH[2].push(b2);
+        }
+        var cA = 0, cT = new Float64Array(NTG), hA = [0, 1, 2].map(function () { return new Float64Array(M); }), hT = [0, 1, 2].map(function () { var a = []; for (var g = 0; g < NTG; g++) a.push(new Float64Array(M)); return a; });
+        var serF = [[], [], []], serR = [[], [], []], s2, u2;
+        for (s2 = 0; s2 < NW; s2++) {
+          u2 = s2 - hh;
+          if (u2 >= 0) {
+            cA++; TGm[u2].forEach(function (g) { cT[g]++; });
+            for (e4 = 0; e4 < 3; e4++) for (ii2 = 0; ii2 < M; ii2++) if (indH[e4][u2][ii2]) { hA[e4][ii2]++; TGm[u2].forEach(function (g) { hT[e4][g][ii2]++; }); }
+          }
+          if (cA < 12) continue;
+          var act3 = TGm[s2].filter(function (g) { return cT[g] >= 6; }), bi4 = 0, bv4 = -Infinity, ov4 = -Infinity, v4;
+          for (ii2 = 0; ii2 < M; ii2++) {
+            if (!act3.length) v4 = hA[1][ii2] / cA;
+            else { v4 = 0; act3.forEach(function (g) { v4 += hT[1][g][ii2] / cT[g]; }); v4 /= act3.length; }
+            if (v4 > bv4 || (v4 === bv4 && hA[1][ii2] > ov4)) { bv4 = v4; ov4 = hA[1][ii2]; bi4 = ii2; }
+          }
+          for (e4 = 0; e4 < 3; e4++) { if (fxA >= 0) serF[e4].push(indH[e4][s2][fxA]); serR[e4].push(indH[e4][s2][bi4]); }
+        }
+        if (!serR[0].length) return;
+        hzUsed++;
+        var hname = hh === 1 ? '1 month' : (hh === 12 ? '1 year' : (hh === 24 ? '2 years' : hh + ' months'));
+        [['Fixed 12m +100 and 6m +100', serF], ['Regime advisor (tuned to top 25%)', serR]].forEach(function (pr) {
+          var sr = pr[1];
+          if (!sr[0].length) return;
+          var rt = sr.map(hzRate), st8 = [hzStretch(sr[0], hh), hzStretch(sr[1], hh)];
+          [[rt[0], 'beat the list'], [rt[1], 'top 25%'], [rt[2], 'top 10%']].forEach(function (x) { if (x[0] >= 0.8) hzOk.push(hname + ', ' + pr[0] + ': ' + x[1] + ' ' + pc(x[0], 0)); });
+          hzRows.push('<tr class="' + (pr[0].indexOf('Regime') === 0 ? 'on' : '') + '"><th class="wrap">' + esc(hname) + ': ' + esc(pr[0]) + '</th><td class="' + (rt[0] >= 0.8 ? 'good' : '') + '">' + pc(rt[0], 0) + '</td><td class="' + (rt[1] >= 0.8 ? 'good' : '') + '">' + pc(rt[1], 0) + '</td><td class="' + (rt[2] >= 0.8 ? 'good' : '') + '">' + pc(rt[2], 0) + '</td><td>' + pc(st8[0], 0) + '</td><td>' + pc(st8[1], 0) + '</td><td>' + serR[0].length + '</td></tr>');
+        });
+      });
+      h += '<h3>Every holding length: 1 month to 2 years</h3>';
+      if (hzRows.length) {
+        h += '<p class="headline">' + (hzOk.length ? 'Reached 80%: <b>' + esc(hzOk.slice(0, 4).join('; ')) + '</b>' + (hzOk.length > 4 ? ' and ' + (hzOk.length - 4) + ' more.' : '.') : 'No holding length reached 80% on any measure.') + '</p>';
+        h += tb(['Holding length and method', 'Beat the list', 'Top 25%', 'Top 10%', '8+ of 10 periods: beat', '8+ of 10 periods: top 25%', 'Windows tested'], hzRows);
+        h += '<p class="note">Each row picks one strategy per window, using only windows that had already finished, and holds it for that length. A hit is a window where the pick beat the list average, or finished among the best 25% or 10% of all ' + M + ' strategies in that window. 8+ of 10 periods looks at every run of 10 separate (non-overlapping) windows and shows how often 8 or more were hits. Windows overlap, so rates are a guide, and longer holds have far fewer separate windows. Daily holding cannot be tested: your prices are monthly, so the shortest test is 1 month. Your stock list holds today survivors, which flatters long-term momentum.</p>';
+      } else h += '<p class="note">Not enough months to test holding lengths.</p>';
       /* 3. window by window */
       var wrows = [], cap = 40, showS = [];
       for (s = 0; s < nW; s += Ln) showS.push(s);
