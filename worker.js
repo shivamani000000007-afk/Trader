@@ -2017,17 +2017,36 @@ var ADV_JS = String.raw`
         iv.cand.map(function (c) { return '<tr><th class="wrap">' + esc(CN[c.cn]) + '</th><td>' + (c.sg > 0 ? '+' : '−') + c.mag + '</td><td class="' + tone(c.lift) + '">x' + Math.exp(c.lift).toFixed(2) + ' vs chance</td></tr>'; }).join('') +
         '<tr><th class="wrap">Filter</th><td>' + (iv.filt ? 'ON' : 'OFF') + '</td><td></td></tr></tbody></table></div>';
     }
-    /* one month of an invented strategy: fresh entry each month, full cost, no stop loss (a little harsher than the held strategies) */
-    function invMonth(k, iv) {
+    /* one month of an invented strategy, carried month to month like the held strategies: same exit rank, stop loss, market filter, weights and cost */
+    function invMonth(k, iv, ST) {
       var sw = PK_W, sf = PK_FILTOV, CA = CACHE, n = P.syms.length, ret = NaN, ben = NaN;
       PK_FILTOV = ''; PK_W = Object.assign({}, iv.w, { filt: iv.filt });
       try {
-        var order = topIdx(scoresAt(P, S, 'custom', k), n).slice(0, N), g = 0, cntOk = 0, pos;
-        for (pos = 0; pos < order.length; pos++) { var f = fwd(P, order[pos], k, 1); if (isFinite(f)) { g += (CA.wts ? (CA.wts[pos] || 0) : 1 / N) * f; cntOk++; } }
-        var bad = false, rgm = PK_OPT.rg, rgl = PK_OPT.rgL, i3;
+        var order = topIdx(scoresAt(P, S, 'custom', k), n), rankOf = {}, i3, exitRank = CA.ex, sl = PK_OPT.sl || 0, cost = CA.cost, wts = CA.wts;
+        for (i3 = 0; i3 < order.length; i3++) rankOf[order[i3]] = i3 + 1;
+        var bad = false, rgm = PK_OPT.rg, rgl = PK_OPT.rgL;
         if (rgm !== 'none' && k >= rgl - 1) { var av = 0; for (i3 = k - rgl + 1; i3 <= k; i3++) av += X.idx[i3]; bad = X.idx[k] < av / rgl; }
         var exv = bad ? (rgm === 'cash' ? 0 : 0.5) : 1;
-        ret = cntOk ? exv * g - CA.cost / 100 * exv : 0;
+        var tgt = exitRank > 0 ? ST.held.filter(function (x) { return rankOf[x] && rankOf[x] <= exitRank; }).slice(0, N) : [];
+        for (i3 = 0; i3 < order.length && tgt.length < N; i3++) if (tgt.indexOf(order[i3]) < 0) tgt.push(order[i3]);
+        if (wts) tgt.sort(function (x, y) { return (rankOf[x] || 1e9) - (rankOf[y] || 1e9); });
+        var g = 0, keep = [], newW = {}, nent = {}, wStop = 0, tw = {}, turn = 0;
+        tgt.forEach(function (x, pos) {
+          var wi = wts ? (wts[pos] || 0) : 1 / N, c0 = P.closes[x][k], e0 = (ST.held.indexOf(x) >= 0 && ST.ent[x]) ? ST.ent[x] : c0, f = fwd(P, x, k, 1);
+          tw[x] = wi;
+          if (!isFinite(f)) { keep.push(x); nent[x] = e0; newW[x] = wi; return; }
+          if (sl > 0) {
+            var lw = P.lows[x][k + 1], lo2 = isFinite(lw) ? lw : P.closes[x][k + 1], lvl = e0 * (1 - sl / 100);
+            if (isFinite(lo2) && lo2 <= lvl) { g += wi * (lvl / c0 - 1); wStop += wi; return; }
+          }
+          g += wi * f; keep.push(x); nent[x] = e0; newW[x] = wi * (1 + f);
+        });
+        var denom = 1 + g;
+        keep.forEach(function (x) { newW[x] = wts ? newW[x] / denom : 1 / N; });
+        Object.keys(tw).forEach(function (x) { turn += Math.abs(tw[x] - (ST.prevW[x] || 0)); });
+        Object.keys(ST.prevW).forEach(function (x) { if (tw[x] === undefined) turn += ST.prevW[x]; });
+        ret = exv * g - cost / 100 * 0.5 * turn * exv - cost / 100 * 0.5 * wStop * exv - cost / 100 * Math.abs(exv - ST.expo) * (tgt.length / N);
+        ST.prevW = newW; ST.held = keep; ST.ent = nent; ST.expo = exv;
         ben = benchAt(P, k, 1).m;
       } finally { dropCustom(P); PK_W = sw; PK_FILTOV = sf; }
       return { ret: ret, ben: isFinite(ben) ? ben : 0, w: iv.w, filt: iv.filt };
@@ -2044,7 +2063,7 @@ var ADV_JS = String.raw`
     }
     function walk(mn, withInv) {
       var sum = TAGS.map(function () { return new Float64Array(M); }), cnt = TAGS.map(function () { return 0; }), sumAll = new Float64Array(M);
-      var ser = {}, bens = [], hist = [], tt, ii;
+      var ser = {}, bens = [], hist = [], tt, ii, ST = { held: [], ent: {}, prevW: {}, expo: 1 };
       var wn = TAGS.map(function () { return new Float64Array(M); }), wy = TAGS.map(function () { return new Float64Array(M); }), cy = TAGS.map(function () { return 0; });
       var L = { sum: sum, cnt: cnt, sumAll: sumAll, wn: wn, wy: wy, cy: cy, wA: new Float64Array(M), wAy: new Float64Array(M), nA: 0, nAy: 0, SI: SI, SV: SV, NS: NS, B: BB, C: CC };
       KEYS.forEach(function (key) { ser[key] = []; }); ser.inv = [];
@@ -2058,7 +2077,7 @@ var ADV_JS = String.raw`
           pk.last = lb;
           KEYS.forEach(function (key) { ser[key].push(RET[pk[key]][tt]); pcs[key] = M > 1 ? (M - 1 - abvOf(pk[key], tt)) / (M - 1) : 1; });
           var invR = null;
-          if (withInv) { invR = invMonth(kFirst + tt, learnW(TG[tt], L, mn)); ser.inv.push(invR.ret); var abI = 0, q3; for (q3 = 0; q3 < M; q3++) if (RET[q3][tt] > invR.ret) abI++; pcs.inv = M > 1 ? (M - 1 - abI) / (M - 1) : 1; }
+          if (withInv) { invR = invMonth(kFirst + tt, learnW(TG[tt], L, mn), ST); ser.inv.push(invR.ret); var abI = 0, q3; for (q3 = 0; q3 < M; q3++) if (RET[q3][tt] > invR.ret) abI++; pcs.inv = M > 1 ? (M - 1 - abI) / (M - 1) : 1; }
           var ab = 0, av = -Infinity; for (ii = 0; ii < M; ii++) if (RET[ii][tt] > av) { av = RET[ii][tt]; ab = ii; }
           hist.push({ t: tt, k: kFirst + tt, adv: pk.all, best: ab, abv: abvOf(pk.all, tt), pc: pcs, ret: RET[pk.all][tt], bestRet: av, ben: BEN[tt], use: TG[tt].filter(function (gi) { return cnt[gi] >= mn; }), tags: TG[tt], rc: rcAll, inv: invR });
         }
@@ -2098,7 +2117,7 @@ var ADV_JS = String.raw`
     var invNow = learnW(act, WL, minN);
     h += '<h3>Invented strategy for ' + esc(lbl) + '</h3><p class="headline">Weights learned from the #1 strategies under the patterns active now: <b>' + invName(invNow) + '</b>.</p>' + invTable(invNow);
     h += '<div class="scroll"><table class="tbl"><tbody><tr class="pick" tabindex="0" data-fw="' + fw({ w: invNow.w, filt: invNow.filt }) + '"><th class="wrap">Tap to load the invented strategy into My own blend</th><td class="wrap">' + invName(invNow) + '</td></tr></tbody></table></div>';
-    h += '<p class="note">Which ingredients to use and whether each is added or subtracted comes from the recipe. How strong each one is (for example 100, 60 or 30) is the average weight it had in the real #1 strategies that used it the same way under these patterns. Up to the 4 best-supported ingredients are kept. The best matching strategy from the list is shown above for comparison.</p>';
+    h += '<p class="note">Invented months are run with your exit rank, stop loss, market filter and cost, carried from month to month like the other strategies. Which ingredients to use and whether each is added or subtracted comes from the recipe. How strong each one is (for example 100, 60 or 30) is the average weight it had in the real #1 strategies that used it the same way under these patterns. Up to the 4 best-supported ingredients are kept. The best matching strategy from the list is shown above for comparison.</p>';
     h += '<h3>The recipe for ' + esc(lbl) + '</h3>' + rcHtml(recipeOf(WL, CS.lift));
     h += '<p class="note">Best placement is the state of each ingredient that is over-represented most in past #1 strategies under the patterns active now. The advised strategy above is the available one that matches this recipe best.</p>';
     /* data depth: how much history the advisor actually read */
@@ -2127,6 +2146,7 @@ var ADV_JS = String.raw`
     /* past-date check: advice made from earlier months only, against the strategy that really came out #1 */
     var mlab = function (key) { return monthLabel(P, key - P.lo); };
     var firstOut = P.lo + kFirst + warm + 1, lastOut = P.lo + kFirst + T, fk = isFinite(fromKey) ? fromKey : firstOut, early = false;
+    var hNow = h; h = '';
     h += '<h3>Check on past dates: advice vs the real #1</h3>';
     if (fk < firstOut) { early = true; fk = firstOut; }
     var tk = isFinite(toKey) ? Math.min(toKey, lastOut) : lastOut;
@@ -2162,7 +2182,7 @@ var ADV_JS = String.raw`
       var cg = function (e) { return Math.pow(e, 12 / n) - 1; };
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Over ' + esc(mlab(fk)) + ' to ' + esc(mlab(tk)) + '</th><th>Yearly growth</th></tr></thead><tbody>' +
         '<tr><th class="wrap">Advisor, changing strategy every month</th><td class="' + tone(cg(eqA)) + '">' + pc(cg(eqA), 1, true) + '</td></tr>' +
-        '<tr><th class="wrap">Advisor, invented weights each month (full cost, no stop loss)</th><td class="' + tone(cg(eqI)) + '">' + pc(cg(eqI), 1, true) + '</td></tr>' +
+        '<tr><th class="wrap">Advisor, invented weights each month</th><td class="' + tone(cg(eqI)) + '">' + pc(cg(eqI), 1, true) + '</td></tr>' +
         '<tr><th class="wrap">Best strategy so far, no patterns</th><td class="' + tone(cg(eqB)) + '">' + pc(cg(eqB), 1, true) + '</td></tr>' +
         '<tr><th class="wrap">Last month winner</th><td class="' + tone(cg(eqLast)) + '">' + pc(cg(eqLast), 1, true) + '</td></tr>' +
         '<tr><th class="wrap">Average stock of your list</th><td class="' + tone(cg(eqL)) + '">' + pc(cg(eqL), 1, true) + '</td></tr>' +
@@ -2223,8 +2243,10 @@ var ADV_JS = String.raw`
         return '<tr class="' + (L.act ? 'on pick' : (L.ok ? 'pick' : '')) + '"' + (L.ok ? ' tabindex="0" data-fw="' + fw(r) + '"' : '') + '><th class="wrap">' + (L.act ? '● ' : '') + esc(tg[0]) + '<br><span class="muted">' + esc(tg[2]) + '</span></th><td>' + tg[1] + '</td><td class="' + (L.ok ? '' : 'warn') + '">' + L.n + (L.ok ? '' : ' (too few)') + '</td><td class="wrap">' + nm(r) + '</td><td class="' + tone(L.ex) + '">' + pc(L.ex, 2, true) + '</td><td>' + pc(L.hit, 0) + '</td></tr>';
       }).join('') + '</tbody></table></div>';
     h += '<p class="note">● marks patterns that are active this month. Rows with too few months are shown for information and ignored by the advice. Candle patterns are read on an equal-weight index built from your stocks monthly open, high, low and close' + (X.ohlc ? '' : '. Your data has no Open, High, Low columns, so candle patterns could not be read') + '. Because the highs and lows are averaged across stocks, shadows look longer than on a real index.</p>';
+    var pastFirst = isFinite(fromKey) || isFinite(toKey);
     h += '<p class="note">How to read this: with hundreds of strategies and only a few months per pattern, the #1 after a pattern is often luck. The walk-forward table is the honest test. If it shows no edge, patterns are not telling you which strategy to use. Your stock list holds today survivors, which flatters old months. Not investment advice.</p>';
-    return h;
+    var setH = '<p class="note"><b>Settings used:</b> stop loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (CACHE && CACHE.ex > 0 ? CACHE.ex : 'off') + ', cost ' + (CACHE ? CACHE.cost : '') + '%, ' + N + ' stocks. Change them in the picker settings, then run again.</p>';
+    return pastFirst ? setH + h + '<h3>Latest month, for reference</h3>' + hNow : setH + hNow + h;
   }
   mount();
 })();
