@@ -2044,6 +2044,82 @@ var ADV_JS = String.raw`
         return '<tr><th class="wrap">' + x[0] + '</th><td class="' + (r.m > 0.5 ? 'good' : 'bad') + '">' + pc(r.m, 0) + '</td><td>' + r.t25 + ' of ' + nT + '</td><td>' + r.t10 + ' of ' + nT + '</td><td>' + num(r.t, 2) + '</td></tr>';
       }));
       h += '<p class="note">' + nT + ' separate ' + Ln + '-month windows, one after another with no overlap. For each, the choice uses only earlier windows. Typical rank 50% is what random choosing gives; strength above 2 is more than luck would explain. Random choosing lands in the top 25% about ' + Math.round(nT * 0.25) + ' times and the top 10% about ' + Math.round(nT * 0.1) + ' times.</p>';
+      /* 2b. Chase the #1: every possible start month, each pick made only from windows that had already finished */
+      var SELN = ['Ingredients from all earlier windows', 'Ingredients from the last window', 'Repeat the last window #1', 'Most consistent so far (best average rank)', 'Best growth since the start', 'Always 12m +100 and 6m +100 (fixed)', 'Always 12m +100 (fixed)', 'Auto: the best-record one of the first five'];
+      var NSEL = SELN.length, KAUTO = 5;
+      var onlyW = function (r, keys) { var ok = true; FCOMPS.forEach(function (cn) { var v = +r.w[cn] || 0; if (keys.indexOf(cn) >= 0 ? v !== 100 : v !== 0) ok = false; }); return ok && !r.filt; };
+      var fxA = -1, fxB = -1;
+      recs.forEach(function (r, ri) { if (onlyW(r, ['m12', 'm6'])) fxA = ri; if (onlyW(r, ['m12'])) fxB = ri; });
+      var BL = new Float64Array(T + 1);
+      for (i = 0; i < T; i++) BL[i + 1] = BL[i] + Math.log(1 + Math.max(-0.99, recs[0].rows[i].bench));
+      var cAcc = new Float64Array(tot), cAccN = 0, posAcc = new Float64Array(M), selPct = [], runS = new Float64Array(NSEL), runN = 0, CS = [], j2;
+      for (j2 = 0; j2 < NSEL; j2++) { selPct.push(new Float64Array(nW)); CS.push({ hit1: 0, t1: 0, t5: 0, t10: 0, t25: 0, pct: [], gr: [], beat: 0, picks: [] }); }
+      var CB = { gr1: [], grMed: [], grList: [] }, cN = 0, t1n = Math.max(1, Math.ceil(M * 0.01)), t5n = Math.max(1, Math.ceil(M * 0.05)), t10n = Math.max(1, Math.ceil(M * 0.1)), t25n = Math.max(1, Math.ceil(M * 0.25));
+      for (s = Ln; s < nW; s++) {
+        var u = s - Ln, pk2 = new Array(NSEL).fill(-1), vA2 = -Infinity, vB2 = -Infinity, vC2 = -Infinity, vD2 = -Infinity, bA2 = 0, bB2 = 0, bC2 = 0, bD2 = 0;
+        for (q = 0; q < tot; q++) cAcc[q] += LF[u * tot + q];
+        cAccN++;
+        for (i = 0; i < M; i++) posAcc[i] += 1 - POS[u * M + i] / (M - 1);
+        for (i = 0; i < M; i++) {
+          var sa4 = 0, sb4 = 0;
+          for (c = 0; c < CC; c++) { var o4 = off[c] + SI[i * CC + c]; sa4 += LF[u * tot + o4]; sb4 += cAcc[o4] / cAccN; }
+          if (sb4 > vB2) { vB2 = sb4; bB2 = i; }
+          if (sa4 > vA2) { vA2 = sa4; bA2 = i; }
+          if (posAcc[i] > vC2) { vC2 = posAcc[i]; bC2 = i; }
+          if (PL[i][s] > vD2) { vD2 = PL[i][s]; bD2 = i; }
+        }
+        pk2[0] = bB2; pk2[1] = bA2; pk2[2] = TOP1[u]; pk2[3] = bC2; pk2[4] = bD2; pk2[5] = fxA; pk2[6] = fxB;
+        if (u >= Ln) { for (j2 = 0; j2 < KAUTO; j2++) runS[j2] += selPct[j2][u]; runN++; }
+        var bj = 0, bjv = -Infinity;
+        if (runN) for (j2 = 0; j2 < KAUTO; j2++) if (runS[j2] / runN > bjv) { bjv = runS[j2] / runN; bj = j2; }
+        pk2[7] = pk2[bj];
+        var grs = [], g1 = -Infinity;
+        for (i = 0; i < M; i++) { var gg = PL[i][s + Ln] - PL[i][s]; grs.push(gg); if (gg > g1) g1 = gg; }
+        grs.sort(function (a, b) { return a - b; });
+        CB.gr1.push(Math.exp(g1) - 1); CB.grMed.push(Math.exp(grs[Math.floor(M / 2)]) - 1); CB.grList.push(Math.exp(BL[s + Ln] - BL[s]) - 1); cN++;
+        for (j2 = 0; j2 < NSEL; j2++) {
+          var pi2 = pk2[j2];
+          if (pi2 < 0) continue;
+          var ps = POS[s * M + pi2], pg = Math.exp(PL[pi2][s + Ln] - PL[pi2][s]) - 1, o5 = CS[j2];
+          selPct[j2][s] = 1 - ps / (M - 1);
+          if (ps === 0) o5.hit1++;
+          if (ps < t1n) o5.t1++;
+          if (ps < t5n) o5.t5++;
+          if (ps < t10n) o5.t10++;
+          if (ps < t25n) o5.t25++;
+          o5.pct.push(selPct[j2][s]); o5.gr.push(pg);
+          if (pg > CB.grList[cN - 1]) o5.beat++;
+          o5.picks.push({ s: s, i: pi2, pos: ps });
+        }
+      }
+      var chaseRows = [], bestJ = -1, bestV = -1;
+      CS.forEach(function (o5, j) {
+        var n5 = o5.pct.length;
+        if (!n5) return;
+        var share = o5.t5 / n5;
+        if (j < KAUTO || j === NSEL - 1) { if (share > bestV) { bestV = share; bestJ = j; } }
+        chaseRows.push('<tr class="' + (j === NSEL - 1 ? 'on' : '') + '"><th class="wrap">' + esc(SELN[j]) + '</th><td>' + o5.hit1 + ' of ' + n5 + ' (' + pc(o5.hit1 / n5, 1) + ')</td><td>' + pc(o5.t5 / n5, 0) + '</td><td>' + pc(o5.t10 / n5, 0) + '</td><td>' + pc(o5.t25 / n5, 0) + '</td><td>' + pc(mean(o5.pct), 0) + '</td><td class="' + tone(mean(o5.gr)) + '">' + pc(mean(o5.gr), 1, true) + '</td><td>' + pc(o5.beat / n5, 0) + '</td></tr>');
+      });
+      var nCh = CB.gr1.length;
+      if (nCh) {
+        chaseRows.push('<tr><th class="wrap">Hindsight: the real #1 of each window (cannot be known in advance)</th><td>' + nCh + ' of ' + nCh + '</td><td>100%</td><td>100%</td><td>100%</td><td>100%</td><td class="good">' + pc(mean(CB.gr1), 1, true) + '</td><td>-</td></tr>');
+        chaseRows.push('<tr><th class="wrap">Typical strategy (median of all)</th><td>-</td><td>-</td><td>-</td><td>-</td><td>50%</td><td class="' + tone(mean(CB.grMed)) + '">' + pc(mean(CB.grMed), 1, true) + '</td><td>-</td></tr>');
+        chaseRows.push('<tr><th class="wrap">Average stock in your list</th><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td class="' + tone(mean(CB.grList)) + '">' + pc(mean(CB.grList), 1, true) + '</td><td>-</td></tr>');
+      }
+      h += '<h3>Chasing the #1 in every possible ' + (Ln === 12 ? 'year' : Ln + '-month window') + '</h3>';
+      if (nCh) {
+        var cb = CS[bestJ], cn5 = cb.pct.length;
+        h += '<p class="headline">Nobody can name the #1 in advance. Across ' + nCh + ' start months, the best way of choosing (<b>' + esc(SELN[bestJ]) + '</b>) landed on the exact #1 in <b>' + cb.hit1 + '</b> (' + pc(cb.hit1 / cn5, 1) + '), in the top ' + t5n + ' (top 5%) in ' + pc(cb.t5 / cn5, 0) + ', and averaged ' + pc(mean(cb.gr), 1, true) + ' a window against ' + pc(mean(CB.gr1), 1, true) + ' for the hindsight #1. Pure luck would hit the exact #1 about once in ' + M + ' tries.</p>';
+        h += tb(['How the strategy is chosen (using only earlier windows)', 'Exact #1', 'Top 5%', 'Top 10%', 'Top 25%', 'Typical rank', 'Average ' + Ln + '-month growth', 'Beat the list'], chaseRows);
+        h += '<p class="note">Every start month with a finished ' + Ln + '-month window is tested (' + nCh + ' windows, overlapping, so counts are a guide). Each pick uses only windows that had ended before the new window began. Typical rank 50% is luck. The fixed rows are simple rules with nothing learned: if a learned method does not beat them, it adds nothing. Top 5% means the pick was among the ' + t5n + ' best of ' + M + ' strategies in that window. Your stock list holds today survivors, which flatters long-term momentum.</p>';
+        var ap = CS[NSEL - 1].picks.filter(function (x) { return (x.s - Ln) % Ln === 0; }).slice(-20), ar = [];
+        ap.forEach(function (x) {
+          var rl = recs[TOP1[x.s]];
+          ar.push('<tr><th class="wrap">' + esc(winLab(x.s)) + '</th><td class="wrap">' + nm(recs[x.i]) + '</td><td class="' + (x.pos < t10n ? 'good' : (x.pos < t25n ? '' : 'bad')) + '">' + (x.pos + 1) + ' of ' + M + '</td><td class="' + tone(Math.exp(PL[x.i][x.s + Ln] - PL[x.i][x.s]) - 1) + '">' + pc(Math.exp(PL[x.i][x.s + Ln] - PL[x.i][x.s]) - 1, 1, true) + '</td><td class="wrap">' + nm(rl) + '</td><td class="good">' + pc(Math.exp(PL[TOP1[x.s]][x.s + Ln] - PL[TOP1[x.s]][x.s]) - 1, 1, true) + '</td></tr>');
+        });
+        h += '<h3>Auto advisor, window after window</h3>' + tb(['Window', 'Advisor picked', 'Its rank', 'Its growth', 'Real #1', 'Real #1 growth'], ar);
+        h += '<p class="note">Last ' + ap.length + ' separate windows, one after another. The advisor choice for each window used only earlier windows.</p>';
+      } else h += '<p class="note">Not enough finished windows to test.</p>';
       /* 3. window by window */
       var wrows = [], cap = 40, showS = [];
       for (s = 0; s < nW; s += Ln) showS.push(s);
