@@ -2176,7 +2176,7 @@ var ADV_JS = String.raw`
           pk.last = lb;
           KEYS.forEach(function (key) { ser[key].push(RET[pk[key]][tt]); pcs[key] = M > 1 ? (M - 1 - abvOf(pk[key], tt)) / (M - 1) : 1; });
           var invR = null;
-          if (withInv) { invR = invMonth(kFirst + tt, learnW(TG[tt], L, mn), ST); ser.inv.push(invR.ret); var abI = 0, q3; for (q3 = 0; q3 < M; q3++) if (RET[q3][tt] > invR.ret) abI++; pcs.inv = M > 1 ? (M - 1 - abI) / (M - 1) : 1; }
+          if (withInv) { invR = invMonth(kFirst + tt, learnW(TG[tt], L, mn), ST); ser.inv.push(invR.ret); var abI = 0, q3; for (q3 = 0; q3 < M; q3++) if (RET[q3][tt] > invR.ret) abI++; pcs.inv = M > 1 ? (M - 1 - abI) / (M - 1) : 1; invR.abv = abI; }
           var ab = 0, av = -Infinity; for (ii = 0; ii < M; ii++) if (RET[ii][tt] > av) { av = RET[ii][tt]; ab = ii; }
           hist.push({ t: tt, k: kFirst + tt, adv: pk.all, best: ab, abv: abvOf(pk.all, tt), pc: pcs, ret: RET[pk.all][tt], bestRet: av, ben: BEN[tt], use: TG[tt].filter(function (gi) { return cnt[gi] >= mn; }), tags: TG[tt], rc: rcAll, inv: invR });
         }
@@ -2259,9 +2259,8 @@ var ADV_JS = String.raw`
       var top10 = hs.filter(function (x) { return x.pc.all >= 0.9; }).length, top25 = hs.filter(function (x) { return x.pc.all >= 0.75; }).length, exact = hs.filter(function (x) { return x.abv === 0; }).length;
       var beatL = hs.filter(function (x) { return x.ret > x.ben; }).length, f0 = hs[0];
       if (early) h += '<p class="note">Your start month is earlier than the first month that can be checked fairly. The tool needs ' + warm + ' months of earlier history first, so the check starts at ' + esc(mlab(fk)) + '.</p>';
-      h += '<p class="headline">As of the end of <b>' + esc(monthLabel(P, f0.k)) + '</b>, using only earlier data, it advised <b>' + nm(recs[f0.adv]) + '</b> for ' + esc(monthLabel(P, f0.k + 1)) + '. The real #1 that month was <b>' + nm(recs[f0.best]) + '</b> (' + pc(f0.bestRet, 1, true) + '). The advised one made ' + pc(f0.ret, 1, true) + ' and ranked ' + (f0.abv + 1) + ' of ' + M + ' strategies.</p>';
+      h += '<p class="headline">As of the end of <b>' + esc(monthLabel(P, f0.k)) + '</b>, using only earlier data, the tool ' + (f0.inv ? 'invented <b>' + invName(f0.inv) + '</b> for ' + esc(monthLabel(P, f0.k + 1)) + '. It made ' + pc(f0.inv.ret, 1, true) + ' and ranked ' + (f0.inv.abv + 1) + ' of ' + M + ' strategies. The best matching strategy from the list was <b>' + nm(recs[f0.adv]) + '</b>, which made ' + pc(f0.ret, 1, true) + ' and ranked ' + (f0.abv + 1) + '. ' : 'advised <b>' + nm(recs[f0.adv]) + '</b> for ' + esc(monthLabel(P, f0.k + 1)) + ', and it made ' + pc(f0.ret, 1, true) + ' (rank ' + (f0.abv + 1) + ' of ' + M + '). ') + 'The real #1 that month was <b>' + nm(recs[f0.best]) + '</b> (' + pc(f0.bestRet, 1, true) + ').</p>';
       if (f0.rc) h += '<p class="note"><b>Recipe the tool built for ' + esc(monthLabel(P, f0.k + 1)) + ' from earlier months only:</b></p>' + rcHtml(f0.rc);
-      if (f0.inv) h += '<p class="note"><b>Invented strategy for ' + esc(monthLabel(P, f0.k + 1)) + ' (earlier months only):</b> ' + invName(f0.inv) + ' made ' + pc(f0.inv.ret, 1, true) + ' against the real #1 ' + pc(f0.bestRet, 1, true) + '.</p>';
       var vd;
       if (n < 12) vd = 'Only ' + n + ' months in this range, too few to judge. Use an earlier start month.';
       else if (tA >= 2 && ma > 0.5) vd = 'Over ' + n + ' months the advised strategy typically beat ' + Math.round(ma * 100) + '% of all strategies (random choosing gives 50%), by more than luck would explain (strength ' + num(tA, 2) + ').';
@@ -2344,7 +2343,7 @@ var ADV_JS = String.raw`
     h += '<p class="note">● marks patterns that are active this month. Rows with too few months are shown for information and ignored by the advice. Candle patterns are read on an equal-weight index built from your stocks monthly open, high, low and close' + (X.ohlc ? '' : '. Your data has no Open, High, Low columns, so candle patterns could not be read') + '. Because the highs and lows are averaged across stocks, shadows look longer than on a real index.</p>';
     var pastFirst = isFinite(fromKey) || isFinite(toKey);
     h += '<p class="note">How to read this: with hundreds of strategies and only a few months per pattern, the #1 after a pattern is often luck. The walk-forward table is the honest test. If it shows no edge, patterns are not telling you which strategy to use. Your stock list holds today survivors, which flatters old months. Not investment advice.</p>';
-    var setH = '<p class="note"><b>Advisor build 4.</b> ' + (isFinite(fromKey) || isFinite(toKey) ? 'Your past dates come first; the latest month is at the bottom. ' : '') + '<b>Settings used:</b> stop loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (CACHE && CACHE.ex > 0 ? CACHE.ex : 'off') + ', cost ' + (CACHE ? CACHE.cost : '') + '%, ' + N + ' stocks. Change them in the picker settings, then run again.</p>';
+    var setH = '<p class="note"><b>Advisor build 5.</b> ' + (isFinite(fromKey) || isFinite(toKey) ? 'Your past dates come first; the latest month is at the bottom. ' : '') + '<b>Settings used:</b> stop loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (CACHE && CACHE.ex > 0 ? CACHE.ex : 'off') + ', cost ' + (CACHE ? CACHE.cost : '') + '%, ' + N + ' stocks. Change them in the picker settings, then run again.</p>';
     return pastFirst ? setH + h + '<h3>Latest month, for reference</h3>' + hNow : setH + hNow + h;
   }
   mount();
