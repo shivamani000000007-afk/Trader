@@ -1623,12 +1623,17 @@ var ADV_JS = String.raw`
       '<p class="note">Step 1: the tool describes the market in every past month (regime, candle on an equal-weight index of your list, chart pattern) and notes which strategy did best after each pattern. Step 2: it reads the same patterns for this month and names the strategy that history favors. Step 3: it tests the whole idea walk-forward, choosing each month only from earlier months, against simpler ways of choosing. Step 4: give a past month in Check from (for example Feb 2016) and it shows what it would have advised for that month using only earlier data, and compares that with the strategy that really came out #1.</p>' +
       '<div class="fields"><div class="field"><div class="lab"><label for="adv-min">Minimum past months per pattern</label></div><select id="adv-min"><option value="6">6 months</option><option value="8" selected>8 months</option><option value="12">12 months</option></select></div>' +
       '<div class="field"><div class="lab"><label for="adv-from">Check on past dates: from month (blank = all)</label></div><input id="adv-from" type="month"></div>' +
-      '<div class="field"><div class="lab"><label for="adv-to">Check to month (blank = latest)</label></div><input id="adv-to" type="month"></div></div>' +
+      '<div class="field"><div class="lab"><label for="adv-to">Check to month (blank = latest)</label></div><input id="adv-to" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="adv-wfrom">Explain a window: from month</label></div><input id="adv-wfrom" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="adv-wto">Explain a window: to month</label></div><input id="adv-wto" type="month"></div></div>' +
       '<div class="row"><button type="button" class="btn" id="adv-run">Read patterns and advise</button></div>' +
+      '<div class="row"><button type="button" class="btn ghost" id="adv-explain">Explain this window: why the #1 formula?</button></div>' +
+      '<div id="adv-xout" class="out"></div>' +
       '<div id="adv-out" class="out"></div>';
     tab.insertBefore(c, out);
     ['input', 'change'].forEach(function (t) { c.addEventListener(t, function (e) { e.stopPropagation(); }); });
     el('adv-run').addEventListener('click', run);
+    el('adv-explain').addEventListener('click', explain);
   }
 
   function buildIdx(P, S) {
@@ -1710,16 +1715,30 @@ var ADV_JS = String.raw`
     return { mean: m, t: d.length > 5 && sd > 0 ? m / (sd / Math.sqrt(d.length)) : NaN };
   }
 
-  async function run() {
-    if (busy) return;
+  function ymv(id) { var e = el(id), mm = /^(\d{4})-(\d{2})/.exec(e && e.value || ''); return mm ? (+mm[1]) * 12 + (+mm[2]) - 1 : NaN; }
+  var CACHE = null;
+  function setX(h) { el('adv-xout').innerHTML = h; }
+  function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+  function fullW(w) { var o = { m12: 0, m6: 0, m3: 0, m1: 0, lv: 0, v12: 0, v6: 0, v3: 0 }; Object.keys(w).forEach(function (k) { o[k] = w[k]; }); return o; }
+  var CN = { m12: '12m', m6: '6m', m3: '3m', m1: '1m', v12: '12m per risk', v6: '6m per risk', v3: '3m per risk', lv: 'calm' };
+  function ingr(w, filt) { var o = []; FCOMPS.forEach(function (c) { if (w[c]) o.push(c + (w[c] > 0 ? '+' : '-')); }); o.push(filt ? 'F1' : 'F0'); return o; }
+  function ingName(id) { if (id === 'F1') return 'Filter ON'; if (id === 'F0') return 'Filter OFF'; return CN[id.slice(0, -1)] + ' ' + (id.slice(-1) === '+' ? '+100' : '−100'); }
+  function tb(head, rows) { return '<div class="scroll"><table class="tbl"><thead><tr>' + head.map(function (x, i) { return '<th' + (i === 0 ? ' class="wrap"' : '') + '>' + x + '</th>'; }).join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>'; }
+  function qstat(q) { var wn = 0; q.rows.forEach(function (r) { if (r.ret > r.bench) wn++; }); return { cagr: q.cagr, bcagr: q.bcagr, dd: q.dd, bdd: q.bdd, win: wn / q.rows.length, n: q.rows.length, ok: q.cagr > q.bcagr && q.dd > q.bdd }; }
+  function wsim(P, S, C, w, filt, a, b) {
+    var sw = PK_W, sf = PK_FILTOV;
+    PK_FILTOV = ''; PK_W = Object.assign({}, w, { filt: filt });
+    try { var q = portSim(P, S, 'custom', C.N, C.ex, C.cost, PK_OPT.rg, PK_OPT.rgL, a, b, PK_OPT.sl, C.wts); dropCustom(P); return q; } finally { PK_W = sw; PK_FILTOV = sf; }
+  }
+  function ckey(N, cost, ex) { return [PK_VER, PK_CACHE.P ? PK_CACHE.P.K : 0, N, cost, ex, PK_OPT.sl, PK_OPT.rg, PK_OPT.rgL, PK_WM, PK_WM === 'custom' ? PK_WLIST : '', PK_MINCONF, PK_BREADTH, PK_MODE].join('|'); }
+  async function build(say) {
     var P = PK_CACHE.P, S = PK_CACHE.S;
-    if (!P || !S || PK_CACHE.stocks !== PKS.store.stocks) { setOut(errBox('Load your stocks and wait for the picks table to appear, then tap again.')); return; }
-    var minN = +el('adv-min').value || 8;
-    var ymv = function (id) { var e = el(id), mm = /^(\d{4})-(\d{2})/.exec(e && e.value || ''); return mm ? (+mm[1]) * 12 + (+mm[2]) - 1 : NaN; };
+    if (!P || !S || PK_CACHE.stocks !== PKS.store.stocks) return { err: 'Load your stocks and wait for the picks table to appear, then tap again.' };
     var N = Math.round(val('pk-n', 10, 1, 20)), cost = val('pk-cost', 0.25, 0, 5);
-    var ex = PK_OPT.exit > 0 ? Math.max(PK_OPT.exit, N + 1) : 0, wts = weightsFor(PK_WM, N);
+    var ex = PK_OPT.exit > 0 ? Math.max(PK_OPT.exit, N + 1) : 0, wts = weightsFor(PK_WM, N), key = ckey(N, cost, ex);
+    if (CACHE && CACHE.key === key && CACHE.P === P) return CACHE;
     var cands = genCands(), recs = [], saveW = PK_W, saveF = PK_FILTOV, total = cands.length * 2, done = 0;
-    busy = true; PK_FILTOV = '';
+    PK_FILTOV = '';
     try {
       for (var ci = 0; ci < cands.length; ci++) {
         for (var f = 0; f < 2; f++) {
@@ -1728,14 +1747,190 @@ var ADV_JS = String.raw`
           dropCustom(P); done++;
           if (!q.err) recs.push({ w: cands[ci], filt: f, name: stratName(cands[ci]), rows: q.rows });
         }
-        if (ci % 6 === 0) { setOut('<p class="note">Testing strategies over the whole history: ' + done + ' of ' + total + '. Please keep this page open...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
+        if (ci % 6 === 0) { say('<p class="note">Testing strategies over the whole history: ' + done + ' of ' + total + '. Please keep this page open...</p>'); await tick(); }
       }
-      if (!recs.length) { setOut(errBox('Too few months of results. Add stocks with longer history.')); return; }
-      var T = recs[0].rows.length; recs = recs.filter(function (r) { return r.rows.length === T; });
-      setOut(render(P, S, recs, N, minN, ymv('adv-from'), ymv('adv-to')));
+    } finally { PK_W = saveW; PK_FILTOV = saveF; }
+    if (!recs.length) return { err: 'Too few months of results. Add stocks with longer history.' };
+    var T = recs[0].rows.length; recs = recs.filter(function (r) { return r.rows.length === T; });
+    CACHE = { key: key, P: P, S: S, recs: recs, N: N, cost: cost, ex: ex, wts: wts };
+    return CACHE;
+  }
+
+  async function explain() {
+    if (busy) return;
+    var a = ymv('adv-wfrom'), b = ymv('adv-wto');
+    if (!isFinite(a) || !isFinite(b)) { setX(errBox('Fill both months of the window, for example Nov 2015 to Oct 2016.')); return; }
+    if (b < a + 2) { setX(errBox('The window must cover at least 3 months.')); return; }
+    busy = true;
+    try {
+      setX('<p class="note">Preparing...</p>');
+      var C = await build(setX);
+      if (C.err) { setX(errBox(C.err)); return; }
+      var P = C.P, S = C.S, recs = C.recs, M = recs.length, L = b - a + 1, T = recs[0].rows.length, kFirst = recs[0].rows[0].k;
+      var firstOut = P.lo + kFirst + 1, lastOut = P.lo + kFirst + T, ml = function (key) { return monthLabel(P, key - P.lo); };
+      if (a < firstOut) { setX(errBox('The first month that can be tested is ' + ml(firstOut) + '. Start the window then or later.')); return; }
+      if (b > lastOut) { setX(errBox('The latest month with a known result is ' + ml(lastOut) + '. End the window then or earlier.')); return; }
+      /* 1. every strategy on the window only, the same way the strategy finder does it */
+      var cands = genCands(), list = [], done = 0, ci, f, q;
+      for (ci = 0; ci < cands.length; ci++) {
+        for (f = 0; f < 2; f++) {
+          q = wsim(P, S, C, fullW(cands[ci]), f, a, b); done++;
+          if (q.err || q.rows.length !== L) continue;
+          var st = qstat(q); st.w = fullW(cands[ci]); st.filt = f; st.name = stratName(cands[ci]); list.push(st);
+        }
+        if (ci % 8 === 0) { setX('<p class="note">Testing every strategy on the window: ' + done + ' of ' + cands.length * 2 + '...</p>'); await tick(); }
+      }
+      if (!list.length) { setX(errBox('No strategy could be tested on that window. Try a longer window.')); return; }
+      var Mw = list.length, byG = list.slice().sort(function (x, y) { return y.cagr - x.cagr; });
+      byG.forEach(function (r, i) { r.rk = i + 1; r.ing = ingr(r.w, r.filt); });
+      var okList = byG.filter(function (r) { return r.ok; }), base = (okList.length ? okList : byG)[0], nOk = okList.length;
+      var t5 = Math.max(10, Math.round(Mw * 0.05)); byG.slice(0, t5).forEach(function (r) { r.t5 = true; });
+      var h = '<h3>Window ' + esc(ml(a)) + ' to ' + esc(ml(b)) + ' (' + L + ' months)</h3>';
+      h += '<p class="headline">' + nOk + ' of ' + Mw + ' strategies beat the list with a smaller fall. The #1 is <b>' + nm(base) + '</b>: ' + pc(base.cagr, 1, true) + ' a year against the list ' + pc(base.bcagr, 1, true) + ', worst fall ' + pc(base.dd, 0) + ' against ' + pc(base.bdd, 0) + ', beat the list in ' + pc(base.win, 0) + ' of months.</p>';
+      /* patterns at window start */
+      var X = buildIdx(P, S), TG = [], t, i, j;
+      for (t = 0; t < T; t++) TG.push(tagsAt(P, S, X, kFirst + t));
+      var t0w = (a - 1 - P.lo) - kFirst, tgNow = TG[t0w] || [], tcount = TAGS.map(function () { return 0; });
+      TG.forEach(function (arr) { arr.forEach(function (gi) { tcount[gi]++; }); });
+      h += '<p class="note"><b>Market at the start (end of ' + esc(ml(a - 1)) + '):</b> ' + (tgNow.length ? tgNow.map(function (gi) { return esc(TAGS[gi][0]) + ' (' + TAGS[gi][1].toLowerCase() + ', seen in ' + tcount[gi] + ' of ' + T + ' months)'; }).join('; ') : 'no regime, candle or chart pattern was active') + '.</p>';
+      /* 2. ingredients */
+      var ids = {};
+      list.forEach(function (r) { r.ing.forEach(function (id) { (ids[id] = ids[id] || []).push(r); }); });
+      var irows = Object.keys(ids).map(function (id) {
+        var g = ids[id], gs = g.slice().sort(function (x, y) { return y.cagr - x.cagr; });
+        return { id: id, n: g.length, ok: g.filter(function (r) { return r.ok; }).length, med: medianOf(g.map(function (r) { return r.cagr; })), inTop: g.filter(function (r) { return r.t5; }).length, lift: (g.filter(function (r) { return r.t5; }).length / g.length) / (t5 / Mw), best: gs[0], inBase: base.ing.indexOf(id) >= 0 };
+      });
+      irows.sort(function (x, y) { return (y.inBase - x.inBase) || (y.lift - x.lift); });
+      h += '<h3>Each ingredient on this window</h3>';
+      h += tb(['Ingredient', 'Strategies using it', 'Beat list, smaller fall', 'Typical growth', 'In the top 5%', 'Lift', 'Best one with it'], irows.map(function (r) {
+        return '<tr class="' + (r.inBase ? 'on' : '') + '"><th class="wrap">' + (r.inBase ? '● ' : '') + esc(ingName(r.id)) + '</th><td>' + r.n + '</td><td>' + r.ok + ' (' + pc(r.ok / r.n, 0) + ')</td><td class="' + tone(r.med) + '">' + pc(r.med, 1, true) + '</td><td>' + r.inTop + ' of ' + t5 + '</td><td class="' + (r.lift >= 1.5 ? 'good' : (r.lift < 0.7 ? 'bad' : '')) + '">' + num(r.lift, 2) + '</td><td class="wrap">' + esc(r.best.name) + ' (' + (r.best.filt ? 'ON' : 'OFF') + ') ' + pc(r.best.cagr, 1, true) + '</td></tr>';
+      }));
+      h += '<p class="note">● marks the ingredients of the #1. Lift compares how often an ingredient appears among the top 5% with how often it appears overall: 1.00 means no better than chance, above 1.5 means clearly over-represented, below 0.7 means under-represented. Strategies use several ingredients at once, so one ingredient alone proves little.</p>';
+      /* 3. neighbours of the #1 */
+      var vars = [], addV = function (label, w, flt) { if (FCOMPS.some(function (c) { return w[c]; })) vars.push({ label: label, w: w, filt: flt }); };
+      FCOMPS.forEach(function (c) {
+        if (base.w[c]) {
+          var sg = base.w[c] > 0 ? '+' : '-', w1 = Object.assign({}, base.w), w2 = Object.assign({}, base.w);
+          w1[c] = 0; w2[c] = -base.w[c];
+          addV('Remove ' + ingName(c + sg), w1, base.filt);
+          addV('Flip to ' + ingName(c + (sg === '+' ? '-' : '+')), w2, base.filt);
+        } else {
+          [100, -100].forEach(function (s) { var w3 = Object.assign({}, base.w); w3[c] = s; addV('Add ' + ingName(c + (s > 0 ? '+' : '-')), w3, base.filt); });
+        }
+      });
+      addV('Filter ' + (base.filt ? 'OFF' : 'ON') + ' instead', base.w, 1 - base.filt);
+      var all1 = [{ label: 'The #1 as it is', w: base.w, filt: base.filt, isBase: true }].concat(vars);
+      for (i = 0; i < all1.length; i++) {
+        var v = all1[i], qw = wsim(P, S, C, v.w, v.filt, a, b), qf = wsim(P, S, C, v.w, v.filt, NaN, NaN);
+        if (qw.err || qf.err) { v.bad = true; continue; }
+        v.win = qstat(qw); v.agg = scanAgg(qf.rows, L); v.rk = 1 + list.filter(function (r) { return r.cagr > v.win.cagr; }).length;
+        if (i % 3 === 0) { setX('<p class="note">Comparing one-step changes to the #1: ' + (i + 1) + ' of ' + all1.length + '...</p>'); await tick(); }
+      }
+      var B0 = all1[0];
+      if (!B0.bad && B0.agg) {
+        var okV = vars.filter(function (v) { return !v.bad && v.agg; });
+        okV.forEach(function (v) {
+          var dW = v.win.cagr - B0.win.cagr, dH = v.agg.medCagr - B0.agg.medCagr;
+          v.verdict = dW > 0 && dH > 0 ? 'Better in the window and over history' : (dW > 0 ? 'Better in the window only, likely fitted to it' : (dH > 0 ? 'Worse in the window, better over history' : 'Worse in both'));
+          v.dW = dW; v.dH = dH;
+        });
+        okV.sort(function (x, y) { return y.dW - x.dW; });
+        h += '<h3>Why this mix and not a small change of it?</h3>';
+        var row = function (v, isB) {
+          return '<tr class="' + (isB ? 'on' : '') + '"><th class="wrap">' + esc(v.label) + (isB ? '<br><span class="muted">' + nm(base) + '</span>' : '') + '</th><td class="' + tone(v.win.cagr) + '">' + pc(v.win.cagr, 1, true) + '</td><td class="bad">' + pc(v.win.dd, 0) + '</td><td>' + v.rk + ' of ' + Mw + '</td><td>' + (v.agg ? pc(v.agg.beat, 0) : '–') + '</td><td class="' + tone(v.agg ? v.agg.medCagr : NaN) + '">' + (v.agg ? pc(v.agg.medCagr, 1, true) : '–') + '</td><td class="wrap">' + (isB ? 'This one' : esc(v.verdict)) + '</td></tr>';
+        };
+        h += tb(['Change', 'Window growth', 'Window fall', 'Rank in window', 'All ' + L + '-month windows: beat list', 'Typical growth there', 'Verdict'], [row(B0, true)].concat(okV.map(function (v) { return row(v, false); })));
+        var bothBetter = okV.filter(function (v) { return v.dW > 0 && v.dH > 0; }).length, winBetter = okV.filter(function (v) { return v.dW > 0; }).length, histBetter = okV.filter(function (v) { return v.dH > 0; }).length;
+        h += '<p class="note"><b>' + winBetter + ' of ' + okV.length + '</b> one-step changes did better than the #1 in this window, <b>' + histBetter + '</b> did better over all ' + L + '-month windows of history, and <b>' + bothBetter + '</b> did better in both. ' + (winBetter === 0 ? 'No small change improved the window, so this exact mix is a local peak for it.' : 'Changes that only win in the window are the ones to distrust, because the #1 was picked after seeing this window.') + '</p>';
+        var m1 = okV.filter(function (v) { return v.label.indexOf('1m') >= 0; });
+        if (m1.length) h += '<p class="note"><b>The 1m question:</b> ' + m1.map(function (v) { return esc(v.label) + ' gives ' + pc(v.win.cagr, 1, true) + ' in the window (rank ' + v.rk + ') against ' + pc(B0.win.cagr, 1, true) + ', and a typical ' + pc(v.agg.medCagr, 1, true) + ' over all windows against ' + pc(B0.agg.medCagr, 1, true) + '. ' + esc(v.verdict) + '.'; }).join(' ') + '</p>';
+      }
+      /* 4. rolling windows across the whole history: where this formula comes */
+      var RET = recs.map(function (r) { return r.rows.map(function (x) { return x.ret; }); }), BEN = recs[0].rows.map(function (x) { return x.bench; });
+      var tIdx = -1; for (i = 0; i < M; i++) if (recs[i].filt === base.filt && FCOMPS.every(function (c) { return (recs[i].w[c] || 0) === base.w[c]; })) { tIdx = i; break; }
+      var RI = recs.map(function (r) { return ingr(r.w, r.filt); }), wins = [], th = Math.ceil(M * 0.1);
+      if (tIdx >= 0) {
+        for (var s0 = 0; s0 + L <= T; s0++) {
+          var be = 1, bpk = 1, bdd = 0, cg = new Float64Array(M), dds = new Float64Array(M), bI = -1, bV = -Infinity, aI = 0, aV = -Infinity, jj;
+          for (jj = 0; jj < L; jj++) { be *= 1 + BEN[s0 + jj]; if (be > bpk) bpk = be; if (be / bpk - 1 < bdd) bdd = be / bpk - 1; }
+          var bcg = Math.pow(be, 12 / L) - 1;
+          for (i = 0; i < M; i++) {
+            var eq = 1, pk = 1, dd = 0, row2 = RET[i];
+            for (jj = 0; jj < L; jj++) { eq *= 1 + row2[s0 + jj]; if (eq > pk) pk = eq; if (eq / pk - 1 < dd) dd = eq / pk - 1; }
+            cg[i] = Math.pow(eq, 12 / L) - 1; dds[i] = dd;
+            if (cg[i] > aV) { aV = cg[i]; aI = i; }
+            if (cg[i] > bcg && dd > bdd && cg[i] > bV) { bV = cg[i]; bI = i; }
+          }
+          if (bI < 0) bI = aI;
+          var ab = 0; for (i = 0; i < M; i++) if (cg[i] > cg[tIdx]) ab++;
+          wins.push({ s: s0, best: bI, bestC: cg[bI], bc: bcg, tc: cg[tIdx], tOk: cg[tIdx] > bcg && dds[tIdx] > bdd, rank: ab + 1 });
+        }
+      }
+      if (wins.length) {
+        var nW = wins.length, good = wins.filter(function (x) { return x.rank <= th; });
+        h += '<h3>Where this formula came up in history (' + L + '-month windows)</h3>';
+        h += '<p class="headline">Across ' + nW + ' ' + L + '-month windows, <b>' + esc(nm(base)) + '</b> beat the list in ' + wins.filter(function (x) { return x.tc > x.bc; }).length + ', ranked in the top 10% in <b>' + good.length + '</b> (chance gives about ' + Math.round(nW * 0.1) + '), and its typical rank was ' + Math.round(100 * (1 - (medianOf(wins.map(function (x) { return x.rank; })) - 1) / Math.max(1, M - 1))) + '% of all strategies.</p>';
+        h += '<div class="chips">' + good.slice(0, 36).map(function (x) { return '<span class="tag">' + esc(monthLabel(P, kFirst + x.s + 1)) + ' (#' + x.rank + ')</span>'; }).join('') + (good.length > 36 ? '<span class="tag">+' + (good.length - 36) + ' more</span>' : '') + '</div>';
+        h += '<p class="note">The chips are the starting months of windows where this exact formula was in the top 10% of all strategies, with its rank. Windows that overlap your own window are the ones it was picked on, so look at the others. If they are bunched in one or two periods, it is a period-specific fit and not a repeatable formation.</p>';
+        /* ingredient frequency among each window winner */
+        var ing2 = {}; RI.forEach(function (arr) { arr.forEach(function (id) { ing2[id] = ing2[id] || { all: 0, win: 0 }; ing2[id].all++; }); });
+        wins.forEach(function (x) { RI[x.best].forEach(function (id) { ing2[id].win++; }); });
+        var irs = Object.keys(ing2).map(function (id) { return { id: id, share: ing2[id].win / nW, base: ing2[id].all / M, inBase: base.ing.indexOf(id) >= 0 }; });
+        irs.sort(function (x, y) { return (y.inBase - x.inBase) || (y.share / y.base - x.share / x.base); });
+        h += tb(['Ingredient', 'Share of window #1s that used it', 'Share of all strategies using it', 'Lift'], irs.map(function (r) { var lf = r.share / r.base; return '<tr class="' + (r.inBase ? 'on' : '') + '"><th class="wrap">' + (r.inBase ? '● ' : '') + esc(ingName(r.id)) + '</th><td>' + pc(r.share, 0) + '</td><td>' + pc(r.base, 0) + '</td><td class="' + (lf >= 1.3 ? 'good' : (lf < 0.7 ? 'bad' : '')) + '">' + num(lf, 2) + '</td></tr>'; }));
+        h += '<p class="note">For every ' + L + '-month window in history, the #1 strategy was found, and this table counts which ingredients it used. A lift above 1 means the ingredient wins more often than its share of strategies, over all of history and not only your window.</p>';
+        /* pattern lift for this formula */
+        var prow = [], allRank = mean(wins.map(function (x) { return 1 - (x.rank - 1) / Math.max(1, M - 1); }));
+        TAGS.forEach(function (tg, gi) {
+          var g = wins.filter(function (x) { return TG[x.s].indexOf(gi) >= 0; });
+          if (g.length < 3) return;
+          prow.push({ gi: gi, n: g.length, top: g.filter(function (x) { return x.rank <= th; }).length / g.length, beat: g.filter(function (x) { return x.tc > x.bc; }).length / g.length, rk: mean(g.map(function (x) { return 1 - (x.rank - 1) / Math.max(1, M - 1); })), now: tgNow.indexOf(gi) >= 0 });
+        });
+        prow.sort(function (x, y) { return (y.now - x.now) || (y.rk - x.rk); });
+        h += '<h3>Which patterns were present when this formula worked</h3>';
+        h += tb(['Pattern at the start of the window', 'Kind', 'Windows', 'Formula in top 10%', 'Formula beat list', 'Typical rank'], ['<tr><th class="wrap">All windows</th><td>–</td><td>' + nW + '</td><td>' + pc(good.length / nW, 0) + '</td><td>' + pc(wins.filter(function (x) { return x.tc > x.bc; }).length / nW, 0) + '</td><td>' + pc(allRank, 0) + '</td></tr>'].concat(prow.map(function (r) {
+          return '<tr class="' + (r.now ? 'on' : '') + '"><th class="wrap">' + (r.now ? '● ' : '') + esc(TAGS[r.gi][0]) + '</th><td>' + TAGS[r.gi][1] + '</td><td>' + r.n + '</td><td class="' + (r.top > good.length / nW * 1.3 ? 'good' : '') + '">' + pc(r.top, 0) + '</td><td>' + pc(r.beat, 0) + '</td><td class="' + (r.rk > allRank + 0.05 ? 'good' : (r.rk < allRank - 0.05 ? 'bad' : '')) + '">' + pc(r.rk, 0) + '</td></tr>';
+        })));
+        h += '<p class="note">● marks patterns active at the start of your window. Compare each row with All windows: a pattern helps only if the top 10% share and the typical rank are clearly above that row, and it has a fair number of windows. Windows overlap heavily, so a few start months count many times. Treat it as a hint.</p>';
+        /* most similar historic starts */
+        if (tgNow.length) {
+          var sim = [];
+          wins.forEach(function (x) {
+            if (Math.abs(x.s - t0w) < L) return;
+            var tg = TG[x.s], inter = tg.filter(function (gi) { return tgNow.indexOf(gi) >= 0; }).length, uni = tg.length + tgNow.length - inter;
+            if (uni && inter) sim.push({ x: x, sim: inter / uni, common: tg.filter(function (gi) { return tgNow.indexOf(gi) >= 0; }) });
+          });
+          sim.sort(function (p, q2) { return (q2.sim - p.sim) || (q2.x.s - p.x.s); });
+          var topS = sim.slice(0, 8);
+          if (topS.length) {
+            h += '<h3>Past starts that looked most like your window</h3>';
+            h += tb(['Start month', 'Match', 'Real #1 then', '#1 growth (list)', 'This formula (list)', 'Its rank'], topS.map(function (r) {
+              var x = r.x;
+              return '<tr><th class="wrap">' + esc(monthLabel(P, kFirst + x.s + 1)) + '<br><span class="muted">' + esc(r.common.map(function (gi) { return TAGS[gi][0]; }).join(', ')) + '</span></th><td>' + pc(r.sim, 0) + '</td><td class="wrap">' + nm(recs[x.best]) + '</td><td>' + pc(x.bestC, 1, true) + ' (' + pc(x.bc, 1, true) + ')</td><td class="' + tone(x.tc - x.bc) + '">' + pc(x.tc, 1, true) + '</td><td>' + x.rank + ' of ' + M + '</td></tr>';
+            }));
+            var sb = topS.filter(function (r) { return r.x.tc > r.x.bc; }).length;
+            h += '<p class="note">In the ' + topS.length + ' past starts with the most similar patterns, this formula beat the list ' + sb + ' times. Match is the share of active patterns the two starts have in common. Nearby months overlap, so these are not independent tests.</p>';
+          }
+        }
+      }
+      h += '<p class="note">How to read this: with ' + Mw + ' strategies tried on one window, the #1 is partly luck. What counts is whether the same ingredients keep winning in other windows and similar markets, which the tables above test. This uses your stock list as it is today, so old months look better than real-time results would have been. Not investment advice.</p>';
+      setX(h);
+    } catch (e) {
+      setX(errBox('Something went wrong: ' + e.message));
+    } finally { busy = false; }
+  }
+
+  async function run() {
+    if (busy) return;
+    var minN = +el('adv-min').value || 8;
+    busy = true;
+    try {
+      var C = await build(setOut);
+      if (C.err) { setOut(errBox(C.err)); return; }
+      setOut(render(C.P, C.S, C.recs, C.N, minN, ymv('adv-from'), ymv('adv-to')));
     } catch (e) {
       setOut(errBox('Something went wrong: ' + e.message));
-    } finally { PK_W = saveW; PK_FILTOV = saveF; busy = false; }
+    } finally { busy = false; }
   }
 
   function render(P, S, recs, N, minN, fromKey, toKey) {
@@ -1761,7 +1956,7 @@ var ADV_JS = String.raw`
           pk.last = lb;
           KEYS.forEach(function (key) { ser[key].push(RET[pk[key]][tt]); pcs[key] = M > 1 ? (M - 1 - abvOf(pk[key], tt)) / (M - 1) : 1; });
           var ab = 0, av = -Infinity; for (ii = 0; ii < M; ii++) if (RET[ii][tt] > av) { av = RET[ii][tt]; ab = ii; }
-          hist.push({ t: tt, k: kFirst + tt, adv: pk.all, best: ab, abv: abvOf(pk.all, tt), pc: pcs, ret: RET[pk.all][tt], bestRet: av, ben: BEN[tt], use: TG[tt].filter(function (gi) { return cnt[gi] >= mn; }) });
+          hist.push({ t: tt, k: kFirst + tt, adv: pk.all, best: ab, abv: abvOf(pk.all, tt), pc: pcs, ret: RET[pk.all][tt], bestRet: av, ben: BEN[tt], use: TG[tt].filter(function (gi) { return cnt[gi] >= mn; }), tags: TG[tt] });
         }
         for (ii = 0; ii < M; ii++) { var e = RET[ii][tt] - BEN[tt]; sumAll[ii] += e; TG[tt].forEach(function (gi) { sum[gi][ii] += e; }); }
         TG[tt].forEach(function (gi) { cnt[gi]++; });
@@ -1837,6 +2032,11 @@ var ADV_JS = String.raw`
       var ways = [['all', 'Patterns: all three kinds'], ['reg', 'Regime patterns only'], ['candle', 'Candle patterns only'], ['chart', 'Chart patterns only'], ['bsf', 'Best strategy so far (no patterns)'], ['last', 'Last month winner']];
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Way of choosing (these dates)</th><th>Typical rank</th></tr></thead><tbody>' +
         ways.map(function (w) { var v = avgPc(hs, w[0]); return '<tr><th class="wrap">' + w[1] + '</th><td class="' + (v > 0.5 ? 'good' : 'bad') + '">' + pc(v, 0) + '</td></tr>'; }).join('') + '</tbody></table></div>';
+      /* accuracy by pattern */
+      var accR = TAGS.map(function (tg, gi) { var g = hs.filter(function (x) { return x.tags.indexOf(gi) >= 0; }); return { gi: gi, n: g.length, v: g.length ? mean(g.map(function (x) { return x.pc.all; })) : NaN, t25: g.filter(function (x) { return x.pc.all >= 0.75; }).length, beat: g.filter(function (x) { return x.ret > x.ben; }).length }; }).filter(function (r) { return r.n > 0; });
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Accuracy when this pattern was active</th><th>Kind</th><th>Months</th><th>Typical rank</th><th>Top 25%</th><th>Beat list</th></tr></thead><tbody>' +
+        accR.map(function (r) { return '<tr><th class="wrap">' + esc(TAGS[r.gi][0]) + (r.n < 6 ? '<br><span class="muted">too few months to trust</span>' : '') + '</th><td>' + TAGS[r.gi][1] + '</td><td>' + r.n + '</td><td class="' + (r.v > 0.5 ? 'good' : 'bad') + '">' + pc(r.v, 0) + '</td><td>' + r.t25 + ' (' + pc(r.t25 / r.n, 0) + ')</td><td>' + r.beat + ' (' + pc(r.beat / r.n, 0) + ')</td></tr>'; }).join('') + '</tbody></table></div>';
+      h += '<p class="note">Each row covers only the months where that pattern was active, so it shows where the advice worked and where it did not. Typical rank above 50% beats random choosing. Months overlap in meaning, because several patterns are often active together.</p>';
       /* which minimum-months setting checked best on these dates */
       var mins = [6, 8, 12, 18];
       if (mins.indexOf(minN) < 0) mins.push(minN);
