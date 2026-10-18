@@ -1629,11 +1629,18 @@ var ADV_JS = String.raw`
       '<div class="row"><button type="button" class="btn" id="adv-run">Read patterns and advise</button></div>' +
       '<div class="row"><button type="button" class="btn ghost" id="adv-explain">Explain this window: why the #1 formula?</button></div>' +
       '<div id="adv-xout" class="out"></div>' +
+      '<h3>Study the #1 neighbourhood</h3>' +
+      '<p class="note">For every window, take the top strategies (the #1 and the ones around it) and measure which ingredients and weights keep showing up. Then test if one period\u2019s ingredients point to the next period\u2019s winners.</p>' +
+      '<div class="fields"><div class="field"><div class="lab"><label for="adv-slen">Window length</label></div><select id="adv-slen"><option value="1">1 month</option><option value="3">3 months</option><option value="6">6 months</option><option value="12" selected>12 months</option><option value="24">24 months</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="adv-scl">Around the #1: top share of strategies</label></div><select id="adv-scl"><option value="1">Top 1%</option><option value="5" selected>Top 5%</option><option value="10">Top 10%</option></select></div></div>' +
+      '<div class="row"><button type="button" class="btn" id="adv-study">Study the #1 neighbourhood</button></div>' +
+      '<div id="adv-sout" class="out"></div>' +
       '<div id="adv-out" class="out"></div>';
     tab.insertBefore(c, out);
     ['input', 'change'].forEach(function (t) { c.addEventListener(t, function (e) { e.stopPropagation(); }); });
     el('adv-run').addEventListener('click', run);
     el('adv-explain').addEventListener('click', explain);
+    el('adv-study').addEventListener('click', study);
   }
 
   function buildIdx(P, S) {
@@ -1962,6 +1969,98 @@ var ADV_JS = String.raw`
     } finally { busy = false; }
   }
 
+
+  /* Research: which ingredients (and weights) sit in the top cluster around the #1, window after window, and do they carry over to the next period? */
+  async function study() {
+    if (busy) return;
+    busy = true;
+    var setS = function (h) { el('adv-sout').innerHTML = h; };
+    try {
+      setS('<p class="note">Preparing...</p>');
+      var C = await build(setS);
+      if (C.err) { setS(errBox(C.err)); return; }
+      var P = C.P, recs = C.recs, M = recs.length, T = recs[0].rows.length, kFirst = recs[0].rows[0].k;
+      var Ln = +el('adv-slen').value || 12, pctC = +el('adv-scl').value || 5, topN = Math.max(3, Math.ceil(M * pctC / 100)), nW = T - Ln + 1;
+      if (nW < Ln + 4) { setS(errBox('Only ' + T + ' months of results, too few for ' + Ln + '-month windows. Choose a shorter window or add stocks with longer history.')); return; }
+      var COMPS = FCOMPS.concat(['filt']), CC = COMPS.length, SI = new Uint8Array(M * CC), SV = [], NS = [], BB = [], off = [], tot = 0, c, i, s, st, p;
+      COMPS.forEach(function (cn, ci) {
+        var mp = {}, vals = [], cnts;
+        recs.forEach(function (r, ri) { var v = cn === 'filt' ? (r.filt ? 1 : 0) : (+r.w[cn] || 0); if (!(v in mp)) { mp[v] = vals.length; vals.push(v); } SI[ri * CC + ci] = mp[v]; });
+        cnts = new Float64Array(vals.length); recs.forEach(function (r, ri) { cnts[SI[ri * CC + ci]]++; });
+        SV.push(vals); NS.push(vals.length); BB.push(Array.prototype.map.call(cnts, function (x) { return x / M; }));
+      });
+      COMPS.forEach(function (cn, ci) { off.push(tot); tot += NS[ci]; });
+      var PL = recs.map(function (r) { var a = new Float64Array(T + 1), t; for (t = 0; t < T; t++) a[t + 1] = a[t] + Math.log(1 + Math.max(-0.99, r.rows[t].ret)); return a; });
+      var POS = new Int32Array(nW * M), TOP1 = new Int32Array(nW), SH = new Float64Array(nW * tot), LF = new Float64Array(nW * tot), ORD = [];
+      for (s = 0; s < nW; s++) {
+        var gr = new Float64Array(M), order = [];
+        for (i = 0; i < M; i++) { gr[i] = PL[i][s + Ln] - PL[i][s]; order.push(i); }
+        order.sort(function (a, b) { return (gr[b] - gr[a]) || (a - b); });
+        for (p = 0; p < M; p++) POS[s * M + order[p]] = p;
+        TOP1[s] = order[0]; ORD.push(order.slice(0, topN));
+        var cnt = new Float64Array(tot);
+        for (p = 0; p < topN; p++) { i = order[p]; for (c = 0; c < CC; c++) cnt[off[c] + SI[i * CC + c]]++; }
+        for (c = 0; c < CC; c++) for (st = 0; st < NS[c]; st++) { var B = BB[c][st], o = off[c] + st; SH[s * tot + o] = cnt[o] / topN; LF[s * tot + o] = Math.log(((cnt[o] + AL * B) / (topN + AL)) / B); }
+        if (s % 20 === 0) { setS('<p class="note">Reading windows: ' + s + ' of ' + nW + '...</p>'); await tick(); }
+      }
+      var lab = function (cc, v) { var cn = COMPS[cc]; if (cn === 'filt') return 'Filter ' + (v ? 'ON' : 'OFF'); return v === 0 ? CN[cn] + ': not used' : CN[cn] + ' ' + (v > 0 ? '+' : '−') + Math.abs(v); };
+      var winLab = function (s0) { return monthLabel(P, kFirst + s0 + 1) + (Ln > 1 ? ' to ' + monthLabel(P, kFirst + s0 + Ln) : ''); };
+      /* 1. ingredient table: how often each placement sits in the top cluster */
+      var rows = [];
+      for (c = 0; c < CC; c++) for (st = 0; st < NS[c]; st++) {
+        var o2 = off[c] + st, B2 = BB[c][st], sa = 0, over = 0;
+        for (s = 0; s < nW; s++) { var shv = SH[s * tot + o2]; sa += shv; if (shv > 0 && shv / B2 >= 1.25) over++; }
+        rows.push({ c: c, v: SV[c][st], base: B2, sh: sa / nW, ratio: sa / nW / B2, over: over });
+      }
+      rows.sort(function (a, b) { return b.ratio - a.ratio; });
+      var stable = rows.filter(function (r) { return r.ratio >= 1.3 && r.over / nW >= 0.6 && !(COMPS[r.c] !== 'filt' && r.v === 0); });
+      var h = '<p class="note"><b>Settings used:</b> stop loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (C.ex > 0 ? C.ex : 'off') + ', cost ' + C.cost + '%, ' + C.N + ' stocks. ' + M + ' strategies, ' + T + ' months, ' + nW + ' overlapping ' + Ln + '-month windows. Cluster = top ' + topN + ' strategies (top ' + pctC + '%).</p>';
+      h += '<h3>Which ingredients sit around the #1</h3>';
+      h += '<p class="headline">' + (stable.length ? stable.length + ' placements are over-represented in the top cluster in most windows: <b>' + stable.slice(0, 6).map(function (r) { return esc(lab(r.c, r.v)); }).join(', ') + '</b>' + (stable.length > 6 ? ' and more' : '') + '.' : 'No placement stays over-represented in the top cluster in most windows. The #1 changes style from window to window.') + '</p>';
+      h += tb(['Ingredient and weight', 'Share of all strategies', 'Share of top cluster', 'Lift', 'Windows where over-represented'], rows.filter(function (r) { return !(COMPS[r.c] !== 'filt' && r.v === 0); }).map(function (r) {
+        return '<tr><th class="wrap">' + esc(lab(r.c, r.v)) + '</th><td>' + pc(r.base, 0) + '</td><td>' + pc(r.sh, 0) + '</td><td class="' + tone(r.ratio - 1) + '">x' + r.ratio.toFixed(2) + '</td><td>' + r.over + ' of ' + nW + ' (' + pc(r.over / nW, 0) + ')</td></tr>';
+      }));
+      h += '<p class="note">Lift above 1 means the placement is in the top cluster more often than its share of all strategies. Over-represented means at least 1.25 times its normal share in that window. Windows overlap, so treat counts as a guide.</p>';
+      /* 2. does one period point to the next? non-overlapping windows, learned only from earlier windows */
+      var tests = [], acc = new Float64Array(tot), accN = 0, nextU = 0;
+      for (s = Ln; s < nW; s += Ln) {
+        while (nextU <= s - Ln) { for (var q = 0; q < tot; q++) acc[q] += LF[nextU * tot + q]; accN++; nextU++; }
+        var bA = 0, bB = 0, vA = -Infinity, vB = -Infinity;
+        for (i = 0; i < M; i++) {
+          var sa2 = 0, sb2 = 0;
+          for (c = 0; c < CC; c++) { var oo = off[c] + SI[i * CC + c]; sa2 += LF[(s - Ln) * tot + oo]; sb2 += acc[oo] / accN; }
+          if (sa2 > vA) { vA = sa2; bA = i; }
+          if (sb2 > vB) { vB = sb2; bB = i; }
+        }
+        var pf = function (ii) { return 1 - POS[s * M + ii] / (M - 1); };
+        tests.push({ s: s, a: pf(bA), b: pf(bB), c: pf(TOP1[s - Ln]), nameA: bA, nameB: bB });
+      }
+      var st2 = function (key) { var v = tests.map(function (x) { return x[key]; }), m = mean(v), sd = sdev(v); return { m: m, t: v.length > 4 && sd > 0 ? (m - 0.5) / (sd / Math.sqrt(v.length)) : NaN, t25: v.filter(function (x) { return x >= 0.75; }).length, t10: v.filter(function (x) { return x >= 0.9; }).length }; };
+      var rA = st2('a'), rB = st2('b'), rC = st2('c'), nT = tests.length;
+      h += '<h3>Do the ingredients carry over to the next period?</h3>';
+      h += '<p class="headline">' + (rB.m > 0.55 && rB.t >= 2 ? 'Yes, somewhat: ingredients learned from all earlier windows placed the next window’s pick at a typical rank of ' + pc(rB.m, 0) + ' (50% = luck).' : (rA.m > 0.55 && rA.t >= 2 ? 'Partly: the last window’s ingredients placed the next pick at a typical rank of ' + pc(rA.m, 0) + ' (50% = luck).' : 'Not reliably. Ingredients learned from earlier windows placed the next window’s pick at a typical rank of ' + pc(rB.m, 0) + ', which is close to luck (50%).')) + '</p>';
+      h += tb(['Way of choosing the next window’s strategy', 'Typical rank', 'Top 25%', 'Top 10%', 'Strength'], [['Ingredients from all earlier windows’ top clusters', rB], ['Ingredients from the last window’s top cluster', rA], ['Simply repeat the last window’s #1', rC]].map(function (x) {
+        var r = x[1];
+        return '<tr><th class="wrap">' + x[0] + '</th><td class="' + (r.m > 0.5 ? 'good' : 'bad') + '">' + pc(r.m, 0) + '</td><td>' + r.t25 + ' of ' + nT + '</td><td>' + r.t10 + ' of ' + nT + '</td><td>' + num(r.t, 2) + '</td></tr>';
+      }));
+      h += '<p class="note">' + nT + ' separate ' + Ln + '-month windows, one after another with no overlap. For each, the choice uses only earlier windows. Typical rank 50% is what random choosing gives; strength above 2 is more than luck would explain. Random choosing lands in the top 25% about ' + Math.round(nT * 0.25) + ' times and the top 10% about ' + Math.round(nT * 0.1) + ' times.</p>';
+      /* 3. window by window */
+      var wrows = [], cap = 40, showS = [];
+      for (s = 0; s < nW; s += Ln) showS.push(s);
+      showS.slice(-cap).forEach(function (s0) {
+        var top3 = [], tt;
+        for (c = 0; c < CC; c++) for (st = 0; st < NS[c]; st++) { if (COMPS[c] !== 'filt' && SV[c][st] === 0) continue; top3.push({ c: c, v: SV[c][st], l: LF[s0 * tot + off[c] + st] }); }
+        top3.sort(function (a, b) { return b.l - a.l; });
+        wrows.push('<tr><th class="wrap">' + esc(winLab(s0)) + '</th><td class="wrap">' + nm(recs[TOP1[s0]]) + '</td><td class="wrap">' + top3.slice(0, 3).map(function (x) { return esc(lab(x.c, x.v)) + ' x' + Math.exp(x.l).toFixed(1); }).join('<br>') + '</td></tr>');
+      });
+      h += '<h3>Window by window</h3>' + tb(['Window', 'Real #1', 'Most over-represented in the top cluster'], wrows);
+      h += '<p class="note">Windows shown do not overlap. Results use each strategy’s month-by-month returns from the full run, with your settings. Your stock list holds today’s survivors, which flatters old months. Not investment advice.</p>';
+      setS(h);
+    } catch (e) {
+      setS(errBox('Something went wrong: ' + e.message));
+    } finally { busy = false; }
+  }
+
   async function run() {
     if (busy) return;
     var minN = Math.min(12, Math.max(1, +el('adv-min').value || 1));
@@ -2245,7 +2344,7 @@ var ADV_JS = String.raw`
     h += '<p class="note">● marks patterns that are active this month. Rows with too few months are shown for information and ignored by the advice. Candle patterns are read on an equal-weight index built from your stocks monthly open, high, low and close' + (X.ohlc ? '' : '. Your data has no Open, High, Low columns, so candle patterns could not be read') + '. Because the highs and lows are averaged across stocks, shadows look longer than on a real index.</p>';
     var pastFirst = isFinite(fromKey) || isFinite(toKey);
     h += '<p class="note">How to read this: with hundreds of strategies and only a few months per pattern, the #1 after a pattern is often luck. The walk-forward table is the honest test. If it shows no edge, patterns are not telling you which strategy to use. Your stock list holds today survivors, which flatters old months. Not investment advice.</p>';
-    var setH = '<p class="note"><b>Advisor build 3.</b> ' + (isFinite(fromKey) || isFinite(toKey) ? 'Your past dates come first; the latest month is at the bottom. ' : '') + '<b>Settings used:</b> stop loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (CACHE && CACHE.ex > 0 ? CACHE.ex : 'off') + ', cost ' + (CACHE ? CACHE.cost : '') + '%, ' + N + ' stocks. Change them in the picker settings, then run again.</p>';
+    var setH = '<p class="note"><b>Advisor build 4.</b> ' + (isFinite(fromKey) || isFinite(toKey) ? 'Your past dates come first; the latest month is at the bottom. ' : '') + '<b>Settings used:</b> stop loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (CACHE && CACHE.ex > 0 ? CACHE.ex : 'off') + ', cost ' + (CACHE ? CACHE.cost : '') + '%, ' + N + ' stocks. Change them in the picker settings, then run again.</p>';
     return pastFirst ? setH + h + '<h3>Latest month, for reference</h3>' + hNow : setH + hNow + h;
   }
   mount();
