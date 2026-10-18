@@ -1398,7 +1398,7 @@ async function pricesResponse(request, env, ctx) {
   return resp;
 }
 
-/* ===== Rolling-window finder: best strategy for 12/24/36/48/60 month holds over many start months ===== */
+/* ===== Rolling-window finder v2: every 12/24/36/48/60 month window inside a period you choose ===== */
 var ROLL_JS = String.raw`
 (function () {
   var LENS = [12, 24, 36, 48, 60], busy = false;
@@ -1416,16 +1416,17 @@ var ROLL_JS = String.raw`
     var c = document.createElement('div');
     c.className = 'card'; c.id = 'roll-card';
     c.innerHTML = '<h2>Rolling-window finder (12 to 60 months)</h2>' +
-      '<p class="note">Tests every first-buy month between the two dates below, for each holding length you tick, using your stock count, costs, exit rank, stop-loss and money split. Example: from Jan 2015 to Dec 2015 gives 12 windows per length (Jan 2015 to Dec 2015, Feb 2015 to Jan 2016, ... Dec 2015 to Nov 2016 for 12 months).</p>' +
+      '<p class="note">Choose a period. For each holding length you tick, the tool lists every window that fits fully inside that period, one start month after another, with the best strategies and their results. Example: period Jan 2015 to Dec 2016 with 12 months gives Jan 2015 to Dec 2015, Feb 2015 to Jan 2016, ... Jan 2016 to Dec 2016 (13 windows). Period Jan 2015 to Dec 2017 with 24 months gives Jan 2015 to Dec 2016, ... Jan 2016 to Dec 2017 (13 windows).</p>' +
       '<div class="fields">' +
-      '<div class="field"><div class="lab"><label for="roll-from">First buy month: from</label></div><input id="roll-from" type="date" value="2015-01-01"></div>' +
-      '<div class="field"><div class="lab"><label for="roll-to">First buy month: to</label></div><input id="roll-to" type="date" value="2015-12-01"></div>' +
+      '<div class="field"><div class="lab"><label for="roll-from">Period starts (month)</label></div><input id="roll-from" type="date" value="2015-01-01"></div>' +
+      '<div class="field"><div class="lab"><label for="roll-to">Period ends (month included)</label></div><input id="roll-to" type="date" value="2016-12-01"></div>' +
       '<div class="field full"><div class="lab"><label>Holding lengths</label></div><div class="chips">' +
-      LENS.map(function (L) { return '<label class="check" style="display:inline-flex;align-items:center;gap:6px;min-height:36px"><input type="checkbox" class="roll-len" value="' + L + '" checked style="width:20px;height:20px;min-height:0"> ' + L + ' months</label>'; }).join('') +
+      LENS.map(function (L) { return '<label class="check" style="display:inline-flex;align-items:center;gap:6px;min-height:36px"><input type="checkbox" class="roll-len" value="' + L + '"' + (L === 12 ? ' checked' : '') + ' style="width:20px;height:20px;min-height:0"> ' + L + ' months</label>'; }).join('') +
       '</div></div>' +
-      '<div class="field full"><div class="lab"><label for="roll-goal">Pick the best by</label></div><select id="roll-goal"><option value="cagr">Most growth (beating list with smaller fall)</option><option value="calmar">Most growth per unit of fall</option><option value="fall">Smallest fall (still beating list)</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="roll-top">Strategies listed per window</label></div><select id="roll-top"><option value="1">Best 1</option><option value="3">Best 3</option><option value="5">Best 5</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="roll-goal">Rank by</label></div><select id="roll-goal"><option value="cagr">Most growth</option><option value="calmar">Growth per unit of fall</option><option value="fall">Smallest fall</option></select></div>' +
       '</div>' +
-      '<div class="row"><button type="button" class="btn" id="roll-run">Find best for each length</button></div>' +
+      '<div class="row"><button type="button" class="btn" id="roll-run">List best for every window</button></div>' +
       '<div id="roll-out" class="out"></div>';
     tab.insertBefore(c, out);
     /* keep these inputs from triggering the page recompute */
@@ -1437,77 +1438,82 @@ var ROLL_JS = String.raw`
     if (busy) return;
     var P = PK_CACHE.P, S = PK_CACHE.S;
     if (!P || !S || PK_CACHE.stocks !== PKS.store.stocks) { setOut(errBox('Load your stocks and wait for the picks table to appear, then tap again.')); return; }
-    var lens = $$('.roll-len').filter(function (x) { return x.checked; }).map(function (x) { return +x.value; });
-    var sFrom = ym('roll-from'), sTo = ym('roll-to'), goal = el('roll-goal').value;
-    if (!lens.length) { setOut(errBox('Tick at least one holding length.')); return; }
-    if (!isFinite(sFrom) || !isFinite(sTo) || sTo < sFrom) { setOut(errBox('Set the first-buy "from" month on or before the "to" month.')); return; }
+    var ticked = $$('.roll-len').filter(function (x) { return x.checked; }).map(function (x) { return +x.value; });
+    var sFrom = ym('roll-from'), sTo = ym('roll-to'), goal = el('roll-goal').value, topK = +el('roll-top').value || 1;
+    if (!ticked.length) { setOut(errBox('Tick at least one holding length.')); return; }
+    if (!isFinite(sFrom) || !isFinite(sTo) || sTo < sFrom) { setOut(errBox('Set the period start on or before the period end.')); return; }
+    var span = sTo - sFrom + 1;
+    var lens = ticked.filter(function (L) { return L <= span; }), skipped = ticked.filter(function (L) { return L > span; });
+    if (!lens.length) { setOut(errBox('Your period is only ' + span + ' months long, shorter than every length you ticked. Widen the period (for 12 months use at least 12 months, for 24 months at least 24).')); return; }
     var N = Math.round(val('pk-n', 10, 1, 20)), cost = val('pk-cost', 0.25, 0, 5);
     var ex = PK_OPT.exit > 0 ? Math.max(PK_OPT.exit, N + 1) : 0, wts = weightsFor(PK_WM, N);
-    var maxL = Math.max.apply(null, lens), endKey = sTo + maxL - 1;
     var cands = genCands(), recs = [], saveW = PK_W, saveF = PK_FILTOV, total = cands.length * 2, done = 0;
     busy = true; PK_FILTOV = '';
     try {
       for (var ci = 0; ci < cands.length; ci++) {
         for (var f = 0; f < 2; f++) {
           PK_W = Object.assign({}, cands[ci], { filt: f });
-          var q = portSim(P, S, 'custom', N, ex, cost, PK_OPT.rg, PK_OPT.rgL, sFrom, endKey, PK_OPT.sl, wts);
+          var q = portSim(P, S, 'custom', N, ex, cost, PK_OPT.rg, PK_OPT.rgL, sFrom, sTo, PK_OPT.sl, wts);
           dropCustom(P);
           done++;
           if (!q.err) recs.push({ w: cands[ci], filt: f, name: stratName(cands[ci]), rows: q.rows });
         }
         if (ci % 6 === 0) { setOut('<p class="note">Testing strategies: ' + done + ' of ' + total + '. Please keep this page open...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
       }
-      if (!recs.length) { setOut(errBox('Too few months of results. Move the first-buy dates earlier or add stocks with longer history.')); return; }
-      var b0 = P.lo + recs[0].rows[0].k + 1, res = {};
+      if (!recs.length) { setOut(errBox('Too few months of results in that period. Move the period or add stocks with longer history.')); return; }
+      var b0 = P.lo + recs[0].rows[0].k + 1, bEnd = b0 + recs[0].rows.length - 1, res = {};
       lens.forEach(function (L) {
         var wins = [], per = recs.map(function () { return { ok: 0, n: 0, cg: [], dd: [] }; });
-        for (var s = sFrom; s <= sTo; s++) {
+        for (var s = sFrom; s + L - 1 <= sTo; s++) {
           var a = s - b0;
           if (a < 0 || a + L > recs[0].rows.length) continue;
-          var best = null, bestOk = null;
-          recs.forEach(function (r, i) {
-            var w = winStats(r.rows, a, L), ok = w.cagr > w.bcagr && w.dd > w.bdd, sc = goalScore(w, goal);
+          var all = recs.map(function (r, i) {
+            var w = winStats(r.rows, a, L), ok = w.cagr > w.bcagr && w.dd > w.bdd;
             per[i].n++; if (ok) per[i].ok++; per[i].cg.push(w.cagr); per[i].dd.push(w.dd);
-            if (!best || sc > best.sc) best = { i: i, w: w, sc: sc };
-            if (ok && (!bestOk || sc > bestOk.sc)) bestOk = { i: i, w: w, sc: sc };
+            return { i: i, w: w, ok: ok, sc: goalScore(w, goal) };
           });
-          wins.push({ s: s, pick: bestOk || best, ok: !!bestOk, x: null });
+          all.sort(function (x, y) { return ((y.ok ? 1 : 0) - (x.ok ? 1 : 0)) || (y.sc - x.sc); });
+          wins.push({ s: s, list: all.slice(0, topK), anyOk: all[0].ok, nOk: all.filter(function (z) { return z.ok; }).length });
         }
         res[L] = { wins: wins, per: per };
       });
-      /* exact re-run of each winner from its own start month (fresh portfolio) */
+      /* exact re-run of each listed strategy from its own start month (fresh portfolio) */
       var ids = [];
-      lens.forEach(function (L) { res[L].wins.forEach(function (w) { ids.push([L, w]); }); });
+      lens.forEach(function (L) { res[L].wins.forEach(function (w) { w.list.forEach(function (it) { ids.push([L, w, it]); }); }); });
       for (var k = 0; k < ids.length; k++) {
-        var L2 = ids[k][0], wn = ids[k][1], rc = recs[wn.pick.i];
+        var L2 = ids[k][0], wn = ids[k][1], it = ids[k][2], rc = recs[it.i];
         PK_W = Object.assign({}, rc.w, { filt: rc.filt });
         var q2 = portSim(P, S, 'custom', N, ex, cost, PK_OPT.rg, PK_OPT.rgL, wn.s, wn.s + L2 - 1, PK_OPT.sl, wts);
         dropCustom(P);
-        if (!q2.err) { var wc = 0; q2.rows.forEach(function (r) { if (r.ret > r.bench) wc++; }); wn.x = { cagr: q2.cagr, bcagr: q2.bcagr, dd: q2.dd, bdd: q2.bdd, win: wc / q2.rows.length }; }
-        if (k % 8 === 0) { setOut('<p class="note">Checking winners: ' + k + ' of ' + ids.length + '...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
+        if (!q2.err) { var wc = 0; q2.rows.forEach(function (r) { if (r.ret > r.bench) wc++; }); it.x = { cagr: q2.cagr, bcagr: q2.bcagr, dd: q2.dd, bdd: q2.bdd, win: wc / q2.rows.length }; }
+        if (k % 8 === 0) { setOut('<p class="note">Checking results: ' + k + ' of ' + ids.length + '...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
       }
-      setOut(render(res, lens, recs, N, sFrom, sTo, recs.length));
+      setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK));
     } catch (e) {
       setOut(errBox('Something went wrong: ' + e.message));
     } finally { PK_W = saveW; PK_FILTOV = saveF; busy = false; }
   }
 
-  function render(res, lens, recs, N, sFrom, sTo, nTested) {
-    var h = '<p class="note">Tested ' + nTested + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month, first buy from ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Tap a row to load that strategy into My own blend.</p>';
+  function render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK) {
+    var h = '<p class="note">Tested ' + recs.length + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month, period ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Tap a row to load that strategy into My own blend.</p>';
+    if (skipped.length) h += errBox('Skipped ' + skipped.join(', ') + ' months: your period is shorter than that. Widen the period to include them.');
+    if (bEnd < sTo) h += errBox('Your price data ends at ' + lbl(bEnd) + ', before the period end, so the last windows are missing.');
     var overall = recs.map(function () { return { sum: 0, c: 0 }; });
     lens.forEach(function (L) {
       var R = res[L], wins = R.wins, per = R.per;
-      h += '<h3>' + L + ' months (' + (L / 12) + (L === 12 ? ' year' : ' years') + ')</h3>';
-      if (!wins.length) { h += errBox('No ' + L + '-month window fits your data from those start months. Pick earlier start months or add stocks with longer history.'); return; }
-      var okN = wins.filter(function (w) { return w.ok; }).length, cnt = {};
-      wins.forEach(function (w) { cnt[w.pick.i] = (cnt[w.pick.i] || 0) + 1; });
+      h += '<h3>' + L + ' months (' + (L / 12) + (L === 12 ? ' year' : ' years') + '): ' + wins.length + ' windows</h3>';
+      if (!wins.length) { h += errBox('No ' + L + '-month window fits your data inside that period. Widen the period or add stocks with longer history.'); return; }
+      var okN = wins.filter(function (w) { return w.anyOk; }).length, cnt = {};
+      wins.forEach(function (w) { cnt[w.list[0].i] = (cnt[w.list[0].i] || 0) + 1; });
       var top = Object.keys(cnt).sort(function (a, b) { return cnt[b] - cnt[a]; }).slice(0, 3);
-      h += '<p class="headline">In <b class="' + (okN === wins.length ? 'good' : (okN ? 'warn' : 'bad')) + '">' + okN + ' of ' + wins.length + '</b> windows some strategy beat the list with a smaller fall. Most frequent winner: <b>' + nm(recs[top[0]]) + '</b>, best in ' + cnt[top[0]] + ' windows.</p>';
-      if (top.length > 1) h += '<p class="note">Also winning often: ' + top.slice(1).map(function (i) { return nm(recs[i]) + ' (' + cnt[i] + ')'; }).join('; ') + '.</p>';
-      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Window</th><th class="wrap">Best strategy</th><th>Growth (list)</th><th>Worst fall (list)</th><th>Months won</th><th>Beat list?</th></tr></thead><tbody>' +
+      h += '<p class="headline">In <b class="' + (okN === wins.length ? 'good' : (okN ? 'warn' : 'bad')) + '">' + okN + ' of ' + wins.length + '</b> windows some strategy beat the list with a smaller fall. Most frequent best: <b>' + nm(recs[top[0]]) + '</b>, in ' + cnt[top[0]] + ' windows.</p>';
+      if (top.length > 1) h += '<p class="note">Also best often: ' + top.slice(1).map(function (i) { return nm(recs[i]) + ' (' + cnt[i] + ')'; }).join('; ') + '.</p>';
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Window</th><th>Rank</th><th class="wrap">Strategy</th><th>Growth (list)</th><th>Worst fall (list)</th><th>Months won</th><th>Beat list?</th></tr></thead><tbody>' +
         wins.map(function (w) {
-          var r = recs[w.pick.i], x = w.x || { cagr: w.pick.w.cagr, bcagr: w.pick.w.bcagr, dd: w.pick.w.dd, bdd: w.pick.w.bdd, win: w.pick.w.win };
-          return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + lbl(w.s) + ' to ' + lbl(w.s + L - 1) + '</th><td class="wrap">' + nm(r) + '</td><td><span class="' + tone(x.cagr) + '">' + pc(x.cagr, 1, true) + '</span> (' + pc(x.bcagr, 1, true) + ')</td><td><span class="bad">' + pc(x.dd, 0) + '</span> (' + pc(x.bdd, 0) + ')</td><td>' + pc(x.win, 0) + '</td><td class="' + (w.ok ? 'good' : 'bad') + '">' + (w.ok ? 'Yes' : 'No') + '</td></tr>';
+          return w.list.map(function (it, ri) {
+            var r = recs[it.i], x = it.x || { cagr: it.w.cagr, bcagr: it.w.bcagr, dd: it.w.dd, bdd: it.w.bdd, win: it.w.win };
+            return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + (ri === 0 ? lbl(w.s) + ' to ' + lbl(w.s + L - 1) + '<br><span class="muted">' + w.nOk + ' strategies beat the list</span>' : '') + '</th><td>#' + (ri + 1) + '</td><td class="wrap">' + nm(r) + '</td><td><span class="' + tone(x.cagr) + '">' + pc(x.cagr, 1, true) + '</span> (' + pc(x.bcagr, 1, true) + ')</td><td><span class="bad">' + pc(x.dd, 0) + '</span> (' + pc(x.bdd, 0) + ')</td><td>' + pc(x.win, 0) + '</td><td class="' + (it.ok ? 'good' : 'bad') + '">' + (it.ok ? 'Yes' : 'No') + '</td></tr>';
+          }).join('');
         }).join('') + '</tbody></table></div>';
       var rank = per.map(function (p, i) { return { i: i, p: p, f: p.n ? p.ok / p.n : 0, mc: medianOf(p.cg), md: medianOf(p.dd), wc: Math.min.apply(null, p.cg) }; });
       rank.forEach(function (x) { overall[x.i].sum += x.f; overall[x.i].c++; });
@@ -1522,7 +1528,7 @@ var ROLL_JS = String.raw`
     if (lens.length > 1) {
       var ov = overall.map(function (o, i) { return { i: i, f: o.c ? o.sum / o.c : 0 }; }).sort(function (a, b) { return b.f - a.f; }).slice(0, 8);
       h += '<h3>Best across all lengths</h3><p class="note">Average share of windows in which the strategy beat the list with a smaller fall, over every length you ticked. A strategy high here works whatever start month and holding length you pick, so it is the least likely to be luck.</p>';
-      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Strategy</th><th>Average share of windows beaten</th>' + lens.map(function (L) { return '<th>' + L + 'm</th>'; }).join('') + '</tr></thead><tbody>' +
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Strategy</th><th>Average share beaten</th>' + lens.map(function (L) { return '<th>' + L + 'm</th>'; }).join('') + '</tr></thead><tbody>' +
         ov.map(function (x) {
           var r = recs[x.i];
           return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + nm(r) + '</th><td class="' + (x.f >= 0.75 ? 'good' : '') + '">' + pc(x.f, 0) + '</td>' + lens.map(function (L) { var p = res[L].per[x.i]; return '<td>' + (p.n ? p.ok + '/' + p.n : '-') + '</td>'; }).join('') + '</tr>';
