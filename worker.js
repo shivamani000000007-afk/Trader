@@ -1429,7 +1429,7 @@ async function pricesResponse(request, env, ctx) {
 /* ===== Rolling-window finder v2: every 12/24/36/48/60 month window inside a period you choose ===== */
 var ROLL_JS = String.raw`
 (function () {
-  var LENS = [1, 2, 3, 6, 12, 24, 36, 48, 60], busy = false;
+  var LENS = [1, 2, 3, 6, 12, 24, 36, 48, 60], busy = false, LAST = null;
   var el = function (id) { return document.getElementById(id); };
   function ym(id) { var m = /^(\d{4})-(\d{2})/.exec((el(id) || {}).value || ''); return m ? (+m[1]) * 12 + (+m[2]) - 1 : NaN; }
   function lbl(k) { return MONTH_NAMES[k % 12] + ' ' + Math.floor(k / 12); }
@@ -1437,93 +1437,6 @@ var ROLL_JS = String.raw`
   function goalScore(w, goal) { return goal === 'calmar' ? (isFinite(w.calmar) ? w.calmar : -1e9) : (goal === 'fall' ? w.dd : w.cagr); }
   function fw(r) { var w = r.w; return [w.m12, w.m6, w.m3, w.m1, w.lv, w.v12, w.v6, w.v3, r.filt].join(','); }
   function nm(r) { return esc(r.name) + ' (filter ' + (r.filt ? 'ON' : 'OFF') + ')'; }
-
-  var UNI = null, LAST = null, curP = null;
-  var WKEYS = ['m12', 'm6', 'm3', 'm1', 'lv', 'v12', 'v6', 'v3'];
-  function zstat(msg, bad) { var e = el('roll-zip-st'); if (!e) return; e.textContent = msg; e.className = 'note' + (bad ? ' bad' : ''); }
-  function inflateRaw(data) {
-    if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open compressed ZIP files. Update the browser, or save the ZIP without compression.');
-    var stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-    return new Response(stream).arrayBuffer();
-  }
-  async function readZip(buf) {
-    var u8 = new Uint8Array(buf), dv = new DataView(buf), n = u8.length, i, eocd = -1, dec = new TextDecoder(), out = [];
-    for (i = n - 22; i >= Math.max(0, n - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
-    if (eocd < 0) throw new Error('That does not look like a ZIP file.');
-    var cnt = dv.getUint16(eocd + 10, true), off = dv.getUint32(eocd + 16, true);
-    for (i = 0; i < cnt; i++) {
-      if (dv.getUint32(off, true) !== 0x02014b50) break;
-      var flag = dv.getUint16(off + 8, true), method = dv.getUint16(off + 10, true), csize = dv.getUint32(off + 20, true);
-      var nl = dv.getUint16(off + 28, true), xl = dv.getUint16(off + 30, true), cl = dv.getUint16(off + 32, true), lho = dv.getUint32(off + 42, true);
-      var name = dec.decode(u8.subarray(off + 46, off + 46 + nl));
-      off += 46 + nl + xl + cl;
-      out.push({ name: name, flag: flag, method: method, csize: csize, lho: lho });
-    }
-    var files = [], skipped = 0;
-    for (i = 0; i < out.length; i++) {
-      var e = out[i], base = e.name.split('/').pop();
-      if (!base || /\/$/.test(e.name) || /^__MACOSX\//.test(e.name) || /^\._/.test(base) || !/\.(csv|txt)$/i.test(base)) { skipped++; continue; }
-      if ((e.flag & 1) || e.csize === 0xFFFFFFFF) { skipped++; continue; }
-      var lnl = dv.getUint16(e.lho + 26, true), lxl = dv.getUint16(e.lho + 28, true), st = e.lho + 30 + lnl + lxl;
-      var data = u8.subarray(st, st + e.csize), bytes;
-      if (e.method === 0) bytes = data;
-      else if (e.method === 8) bytes = new Uint8Array(await inflateRaw(data));
-      else { skipped++; continue; }
-      files.push({ name: base, text: dec.decode(bytes) });
-    }
-    return { files: files, skipped: skipped };
-  }
-  async function loadZip(file) {
-    zstat('Reading ' + file.name + '...');
-    try {
-      var z = await readZip(await file.arrayBuffer()), stocks = {}, bad = [], ok = 0, j;
-      if (!z.files.length) throw new Error('No CSV files found inside that ZIP.');
-      for (j = 0; j < z.files.length; j++) {
-        var d = z.files[j];
-        try {
-          parseMulti(d.text, cleanSymbol(d.name)).forEach(function (q) {
-            var sym = cleanSymbol(q.sym) || cleanSymbol(d.name), map = toMonthMap(q.t, q.c, q.o, q.h, q.l), cur = stocks[sym] || (stocks[sym] = { m: {} });
-            for (var k in map) { var o = cur.m[k]; if (!o || map[k][1] >= o[1]) cur.m[k] = map[k]; }
-            ok++;
-          });
-        } catch (er) { bad.push(d.name); }
-        if (j % 20 === 0) { zstat('Reading stocks: ' + j + ' of ' + z.files.length + '...'); await new Promise(function (r2) { setTimeout(r2, 0); }); }
-      }
-      var P = buildPanel(stocks);
-      if (!P || P.syms.length < 6) throw new Error('Only ' + (P ? P.syms.length : 0) + ' usable stocks in that ZIP. The finder needs at least 6, one CSV per stock with Date and Close columns.');
-      if (P.kSig < 30) throw new Error('The stocks in that ZIP cover only ' + (P.kSig + 1) + ' complete months. At least 30 are needed.');
-      UNI = { name: file.name, P: P, S: computeSignals(P), skipped: z.skipped + bad.length };
-      LAST = null; if (el('roll-dl')) el('roll-dl').hidden = true;
-      el('roll-zip-clear').hidden = false;
-      zstat('Using ' + P.syms.length + ' stocks from ' + file.name + ' (' + monthLabel(P, 0) + ' to ' + monthLabel(P, P.kSig) + ')' + (UNI.skipped ? '. ' + UNI.skipped + ' file(s) skipped' + (bad.length ? ' (could not read: ' + bad.slice(0, 5).join(', ') + ')' : '') : '') + '. The finder below uses only these stocks.');
-    } catch (e) { zstat(e.message, true); }
-  }
-  function clearZip() {
-    UNI = null; LAST = null; el('roll-zip-clear').hidden = true; if (el('roll-dl')) el('roll-dl').hidden = true;
-    zstat('Using the stock list loaded above.');
-  }
-  function csvCell(v) { var t = String(v == null ? '' : v); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; }
-  function downloadTop5() {
-    if (!LAST) return;
-    var D = LAST, rows = [['Holding length (months)', 'Window start', 'Window end', 'Rank', 'Strategy', 'Filter', 'Weight 12m', 'Weight 6m', 'Weight 3m', 'Weight 1m', 'Weight calm', 'Weight 12m per risk', 'Weight 6m per risk', 'Weight 3m per risk', 'Growth in window %', 'Yearly growth %', 'List growth in window %', 'List yearly growth %', 'Worst fall %', 'List worst fall %', 'Months won %', 'Beat list with smaller fall', 'Stocks per month', 'Stock source']];
-    var pct = function (v) { return isFinite(v) ? (v * 100).toFixed(2) : ''; };
-    D.lens.forEach(function (L) {
-      D.res[L].wins.forEach(function (w) {
-        w.top5.forEach(function (it, ri) {
-          var r2 = D.recs[it.i], x = it.x || { cagr: it.w.cagr, bcagr: it.w.bcagr, dd: it.w.dd, bdd: it.w.bdd, win: it.w.win };
-          var g = function (c) { return Math.pow(1 + c, L / 12) - 1; };
-          var ok = x.cagr > x.bcagr && (L < 12 ? x.dd >= x.bdd : x.dd > x.bdd);
-          rows.push([L, lbl(w.s), lbl(w.s + L - 1), '#' + (ri + 1), r2.name, r2.filt ? 'ON' : 'OFF'].concat(WKEYS.map(function (k) { return r2.w[k]; }),
-            [pct(g(x.cagr)), pct(x.cagr), pct(g(x.bcagr)), pct(x.bcagr), pct(x.dd), pct(x.bdd), pct(x.win), ok ? 'Yes' : 'No', D.N, D.source]));
-        });
-      });
-    });
-    var csv = '\uFEFF' + rows.map(function (q) { return q.map(csvCell).join(','); }).join('\r\n') + '\r\n';
-    var url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), a = document.createElement('a');
-    a.href = url; a.download = 'rolling_window_top5_' + lbl(D.sFrom).replace(' ', '_') + '_to_' + lbl(D.sTo).replace(' ', '_') + '.csv';
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-  }
 
   function mount() {
     var tab = el('tab-pk'), out = el('out-pk');
@@ -1538,34 +1451,26 @@ var ROLL_JS = String.raw`
       '<div class="field full"><div class="lab"><label>Holding lengths</label></div><div class="chips">' +
       LENS.map(function (L) { return '<label class="check" style="display:inline-flex;align-items:center;gap:6px;min-height:36px"><input type="checkbox" class="roll-len" value="' + L + '"' + (L === 12 ? ' checked' : '') + ' style="width:20px;height:20px;min-height:0"> ' + (L === 1 ? '1 month' : L + ' months') + '</label>'; }).join('') +
       '</div></div>' +
-      '<div class="field"><div class="lab"><label for="roll-top">Strategies listed per window</label></div><select id="roll-top"><option value="1">Best 1</option><option value="3">Best 3</option><option value="5">Best 5</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="roll-top">Strategies listed per window</label></div><select id="roll-top"><option value="all" selected>All 432 strategies (full CSV download)</option><option value="1">Best 1</option><option value="3">Best 3</option><option value="5">Best 5</option></select></div>' +
       '<div class="field"><div class="lab"><label for="roll-goal">Rank by</label></div><select id="roll-goal"><option value="cagr">Most growth</option><option value="calmar">Growth per unit of fall</option><option value="fall">Smallest fall</option></select></div>' +
       '<div class="field"><div class="lab"><label for="roll-anchor">Anchor window starts (month)</label></div><input id="roll-anchor" type="date" value="2015-01-01"></div>' +
       '</div>' +
       '<p class="note">Anchor window: the tool takes the best strategy of that one window (for example Jan 2015 to Dec 2015) and tests it in every other window. A table below also does this for every window at once.</p>' +
-      '<div class="field full"><div class="lab"><label>Stocks for this finder (optional)</label></div><div class="row"><label class="btn ghost" for="roll-zip">Upload stocks ZIP</label><input id="roll-zip" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden><button type="button" class="btn ghost" id="roll-zip-clear" hidden>Use the loaded list instead</button></div><p class="note" id="roll-zip-st" role="status">Using the stock list loaded above. Or upload a ZIP with one CSV per stock (Date and Close columns, daily or monthly) to run the finder on just those stocks.</p></div>' +
-      '<div class="row"><button type="button" class="btn" id="roll-run">List best for every window</button><button type="button" class="btn ghost" id="roll-dl" hidden>Download #1 to #5 (CSV)</button></div>' +
+      '<div class="row"><button type="button" class="btn" id="roll-run">List best for every window</button></div>' +
       '<div id="roll-out" class="out"></div>';
     tab.insertBefore(c, out);
     /* keep these inputs from triggering the page recompute */
     ['input', 'change'].forEach(function (t) { c.addEventListener(t, function (e) { e.stopPropagation(); }); });
     el('roll-run').addEventListener('click', run);
-    el('roll-dl').addEventListener('click', downloadTop5);
-    el('roll-zip-clear').addEventListener('click', clearZip);
-    el('roll-zip').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; if (f) loadZip(f); e.target.value = ''; });
+    c.addEventListener('click', function (e) { var t = e.target; if (t && t.id === 'roll-dl') download(); });
   }
 
   async function run() {
     if (busy) return;
-    var P, S;
-    if (UNI) { P = UNI.P; S = UNI.S; }
-    else {
-      P = PK_CACHE.P; S = PK_CACHE.S;
-      if (!P || !S || PK_CACHE.stocks !== PKS.store.stocks) { setOut(errBox('Load your stocks and wait for the picks table to appear, then tap again. Or upload a stocks ZIP above.')); return; }
-    }
-    curP = P; el('roll-dl').hidden = true;
+    var P = PK_CACHE.P, S = PK_CACHE.S;
+    if (!P || !S || PK_CACHE.stocks !== PKS.store.stocks) { setOut(errBox('Load your stocks and wait for the picks table to appear, then tap again.')); return; }
     var ticked = $$('.roll-len').filter(function (x) { return x.checked; }).map(function (x) { return +x.value; });
-    var anchor = ym('roll-anchor'), sFrom = ym('roll-from'), sTo = ym('roll-to'), goal = el('roll-goal').value, topK = +el('roll-top').value || 1;
+    var anchor = ym('roll-anchor'), sFrom = ym('roll-from'), sTo = ym('roll-to'), goal = el('roll-goal').value, listAll = el('roll-top').value === 'all', topK = listAll ? 1 : (+el('roll-top').value || 1);
     if (!ticked.length) { setOut(errBox('Tick at least one holding length.')); return; }
     if (!isFinite(sFrom) || !isFinite(sTo) || sTo < sFrom) { setOut(errBox('Set the period start on or before the period end.')); return; }
     var span = sTo - sFrom + 1;
@@ -1587,6 +1492,7 @@ var ROLL_JS = String.raw`
         if (ci % 6 === 0) { setOut('<p class="note">Testing strategies: ' + done + ' of ' + total + '. Please keep this page open...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
       }
       if (!recs.length) { setOut(errBox('Too few months of results in that period. Move the period or add stocks with longer history.')); return; }
+      if (listAll) topK = recs.length;
       var b0 = P.lo + recs[0].rows[0].k + 1, bEnd = b0 + recs[0].rows.length - 1, res = {};
       lens.forEach(function (L) {
         var wins = [], per = recs.map(function () { return { ok: 0, n: 0, cg: [], dd: [], ws: [] }; });
@@ -1595,17 +1501,18 @@ var ROLL_JS = String.raw`
           if (a < 0 || a + L > recs[0].rows.length) continue;
           var all = recs.map(function (r, i) {
             var w = winStats(r.rows, a, L), ok = w.cagr > w.bcagr && (L < 12 ? w.dd >= w.bdd : w.dd > w.bdd);
-            per[i].n++; if (ok) per[i].ok++; per[i].cg.push(w.cagr); per[i].dd.push(w.dd); per[i].ws.push({ s: s, cagr: w.cagr, bcagr: w.bcagr, dd: w.dd, bdd: w.bdd, win: w.win, ok: ok });
+            per[i].n++; if (ok) per[i].ok++; per[i].cg.push(w.cagr); per[i].dd.push(w.dd); per[i].ws.push({ s: s, cagr: w.cagr, bcagr: w.bcagr, dd: w.dd, bdd: w.bdd, win: w.win, ok: ok, rank: 0 });
             return { i: i, w: w, ok: ok, sc: goalScore(w, goal) };
           });
           all.sort(function (x, y) { return ((y.ok ? 1 : 0) - (x.ok ? 1 : 0)) || (y.sc - x.sc); });
-          wins.push({ s: s, list: all.slice(0, topK), top5: all.slice(0, 5), anyOk: all[0].ok, nOk: all.filter(function (z) { return z.ok; }).length });
+          all.forEach(function (z, rk) { var wsl = per[z.i].ws; wsl[wsl.length - 1].rank = rk + 1; });
+          wins.push({ s: s, list: all.slice(0, topK), anyOk: all[0].ok, nOk: all.filter(function (z) { return z.ok; }).length });
         }
         res[L] = { wins: wins, per: per };
       });
       /* exact re-run of each listed strategy from its own start month (fresh portfolio) */
       var ids = [];
-      lens.forEach(function (L) { res[L].wins.forEach(function (w) { w.top5.forEach(function (it) { ids.push([L, w, it]); }); }); });
+      lens.forEach(function (L) { res[L].wins.forEach(function (w) { w.list.forEach(function (it) { ids.push([L, w, it]); }); }); });
       for (var k = 0; k < ids.length; k++) {
         var L2 = ids[k][0], wn = ids[k][1], it = ids[k][2], rc = recs[it.i];
         PK_W = Object.assign({}, rc.w, { filt: rc.filt });
@@ -1614,16 +1521,16 @@ var ROLL_JS = String.raw`
         if (!q2.err) { var wc = 0; q2.rows.forEach(function (r) { if (r.ret > r.bench) wc++; }); it.x = { cagr: q2.cagr, bcagr: q2.bcagr, dd: q2.dd, bdd: q2.bdd, win: wc / q2.rows.length }; }
         if (k % 8 === 0) { setOut('<p class="note">Checking results: ' + k + ' of ' + ids.length + '...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
       }
-      LAST = { res: res, lens: lens, recs: recs, N: N, sFrom: sFrom, sTo: sTo, source: UNI ? UNI.name + ' (' + P.syms.length + ' stocks)' : 'Loaded list (' + P.syms.length + ' stocks)' };
+      LAST = { res: res, lens: lens, recs: recs, N: N, sFrom: sFrom, sTo: sTo, listAll: listAll };
       setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor));
-      el('roll-dl').hidden = false;
     } catch (e) {
       setOut(errBox('Something went wrong: ' + e.message));
     } finally { PK_W = saveW; PK_FILTOV = saveF; busy = false; }
   }
 
   function render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor) {
-    var h = '<p class="note">Tested ' + recs.length + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month from ' + (UNI ? 'your ZIP (' + esc(UNI.name) + ', ' + curP.syms.length + ' stocks)' : 'the loaded list (' + curP.syms.length + ' stocks)') + ', period ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Use Download #1 to #5 above for a CSV of the top five in every window. Tap a row to load that strategy into My own blend.</p>';
+    var showK = Math.min(topK, 5);
+    var h = '<div class="row"><button type="button" class="btn" id="roll-dl">Download all ' + recs.length + ' strategies for every window (CSV)</button></div><p class="note">The CSV has one row per strategy per window per holding length' + (topK > 5 ? ', ranked, so nothing is cut off. The tables below show the best ' + showK + ' per window to stay readable' : '') + '.</p><p class="note">Tested ' + recs.length + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month, period ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Tap a row to load that strategy into My own blend.</p>';
     if (skipped.length) h += errBox('Skipped ' + skipped.join(', ') + ' months: your period is shorter than that. Widen the period to include them.');
     if (bEnd < sTo) h += errBox('Your price data ends at ' + lbl(bEnd) + ', before the period end, so the last windows are missing.');
     var overall = recs.map(function () { return { sum: 0, c: 0 }; });
@@ -1639,7 +1546,7 @@ var ROLL_JS = String.raw`
       if (top.length > 1) h += '<p class="note">Also best often: ' + top.slice(1).map(function (i) { return nm(recs[i]) + ' (' + cnt[i] + ')'; }).join('; ') + '.</p>';
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Window</th><th>Rank</th><th class="wrap">Strategy</th><th>' + gl + ' (list)</th><th>Worst fall (list)</th><th>Months won</th><th>Beat list?</th></tr></thead><tbody>' +
         wins.map(function (w) {
-          return w.list.map(function (it, ri) {
+          return w.list.slice(0, showK).map(function (it, ri) {
             var r = recs[it.i], x = it.x || { cagr: it.w.cagr, bcagr: it.w.bcagr, dd: it.w.dd, bdd: it.w.bdd, win: it.w.win };
             return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + (ri === 0 ? lbl(w.s) + ' to ' + lbl(w.s + L - 1) + '<br><span class="muted">' + w.nOk + ' strategies beat the list</span>' : '') + '</th><td>#' + (ri + 1) + '</td><td class="wrap">' + nm(r) + '</td><td><span class="' + tone(x.cagr) + '">' + pc(G(x.cagr), 1, true) + '</span> (' + pc(G(x.bcagr), 1, true) + ')</td><td><span class="bad">' + pc(x.dd, 0) + '</span> (' + pc(x.bdd, 0) + ')</td><td>' + pc(x.win, 0) + '</td><td class="' + (it.ok ? 'good' : 'bad') + '">' + (it.ok ? 'Yes' : 'No') + '</td></tr>';
           }).join('');
@@ -1656,7 +1563,7 @@ var ROLL_JS = String.raw`
 
       /* switching test for short windows: change strategy every window using only the previous window's best */
       if (L <= 12) {
-        var Pq = curP, b0s = Pq.lo + recs[0].rows[0].k + 1, seq = wins.filter(function (w) { return (w.s - sFrom) % L === 0; }), eqS = 1, eqL = 1, eqF = 1, eqH = 1, nbS = 0, nbF = 0, nbH = 0, nSw = 0, chg = 0, prv = -1, fixI = rank[0].i, j, q4;
+        var Pq = PK_CACHE.P, b0s = Pq.lo + recs[0].rows[0].k + 1, seq = wins.filter(function (w) { return (w.s - sFrom) % L === 0; }), eqS = 1, eqL = 1, eqF = 1, eqH = 1, nbS = 0, nbF = 0, nbH = 0, nSw = 0, chg = 0, prv = -1, fixI = rank[0].i, j, q4;
         for (j = 1; j < seq.length; j++) {
           var pi = seq[j - 1].list[0].i, hi2 = seq[j].list[0].i, a2 = seq[j].s - b0s, g1 = 1, g2 = 1, g3 = 1, g4 = 1;
           for (q4 = a2; q4 < a2 + L; q4++) { g1 *= 1 + recs[pi].rows[q4].ret; g2 *= 1 + recs[pi].rows[q4].bench; g3 *= 1 + recs[fixI].rows[q4].ret; g4 *= 1 + recs[hi2].rows[q4].ret; }
@@ -1727,6 +1634,32 @@ var ROLL_JS = String.raw`
     }
     h += '<p class="note">How to read this: the best strategy in each window is picked with hindsight, so part of it is luck. Trust the consistency tables more. Numbers in the window table come from a fresh portfolio started in that window. The search itself reuses one continuous run for speed, so a few borderline picks can differ slightly. Windows that overlap share months. Your stock list holds today\u2019s survivors, which flatters old periods. Not investment advice.</p>';
     return h;
+  }
+
+  function csvCell(v) { var s = (v === null || v === undefined || (typeof v === 'number' && !isFinite(v))) ? '' : String(v); return '"' + s.replace(/"/g, '""') + '"'; }
+  function p2(x) { return isFinite(x) ? Math.round(x * 10000) / 100 : ''; }
+  function download() {
+    if (!LAST) return;
+    var R = LAST, recs = R.recs, out = [['Holding length (months)', 'Window start', 'Window end', 'Rank in window', 'Strategy', 'Downtrend filter', '12m momentum wt', '6m momentum wt', '3m momentum wt', '1m momentum wt', '12m per risk wt', '6m per risk wt', '3m per risk wt', 'Low volatility wt', 'Growth in window %', 'List growth in window %', 'Yearly growth rate %', 'List yearly growth rate %', 'Worst fall %', 'List worst fall %', 'Months won %', 'Beat list with smaller fall', 'Basis']];
+    R.lens.forEach(function (L) {
+      var D = R.res[L];
+      if (!D || !D.wins.length) return;
+      D.wins.forEach(function (w, k) {
+        var exact = {};
+        w.list.forEach(function (it) { if (it.x) exact[it.i] = it.x; });
+        var rows = recs.map(function (r, i) { return { i: i, z: D.per[i].ws[k], x: exact[i] }; });
+        rows.sort(function (a, b) { return a.z.rank - b.z.rank; });
+        rows.forEach(function (o) {
+          var r = recs[o.i], m = o.x || o.z, gw = function (c) { return Math.pow(1 + c, L / 12) - 1; };
+          out.push([L, lbl(w.s), lbl(w.s + L - 1), o.z.rank, r.name, r.filt ? 'ON' : 'OFF', r.w.m12, r.w.m6, r.w.m3, r.w.m1, r.w.v12, r.w.v6, r.w.v3, r.w.lv, p2(gw(m.cagr)), p2(gw(m.bcagr)), p2(m.cagr), p2(m.bcagr), p2(m.dd), p2(m.bdd), p2(m.win), o.z.ok ? 'Yes' : 'No', o.x ? 'Fresh portfolio from window start' : 'Continuous run']);
+        });
+      });
+    });
+    var blob = new Blob(['﻿' + out.map(function (r) { return r.map(csvCell).join(','); }).join('\n')], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = 'all_strategies_per_window_V8.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
   }
   mount();
 })();
