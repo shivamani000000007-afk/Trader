@@ -1438,7 +1438,8 @@ var ROLL_JS = String.raw`
   function fw(r) { var w = r.w; return [w.m12, w.m6, w.m3, w.m1, w.lv, w.v12, w.v6, w.v3, r.filt].join(','); }
   function nm(r) { return esc(r.name) + ' (filter ' + (r.filt ? 'ON' : 'OFF') + ')'; }
 
-  var UNI = null, LAST = null, curP = null;
+  var UNI = null, LAST = null, curP = null, dlBusy = false, lastY = 0;
+  async function tick(msg, force) { var t = Date.now(); if (!force && t - lastY < 80) return; lastY = t; if (msg) setOut('<p class="note">' + msg + ' Please keep this page open...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
   var WKEYS = ['m12', 'm6', 'm3', 'm1', 'lv', 'v12', 'v6', 'v3'];
   function zstat(msg, bad) { var e = el('roll-zip-st'); if (!e) return; e.textContent = msg; e.className = 'note' + (bad ? ' bad' : ''); }
   function inflateRaw(data) {
@@ -1503,26 +1504,47 @@ var ROLL_JS = String.raw`
     zstat('Using the stock list loaded above.');
   }
   function csvCell(v) { var t = String(v == null ? '' : v); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; }
-  function downloadAll() {
-    if (!LAST) return;
-    var D = LAST, rows = [['Holding length (months)', 'Window start', 'Window end', 'Rank', 'Strategy', 'Filter', 'Weight 12m', 'Weight 6m', 'Weight 3m', 'Weight 1m', 'Weight calm', 'Weight 12m per risk', 'Weight 6m per risk', 'Weight 3m per risk', 'Growth in window %', 'Yearly growth %', 'List growth in window %', 'List yearly growth %', 'Worst fall %', 'List worst fall %', 'Months won %', 'Beat list with smaller fall', 'Stocks per month', 'Stock source']];
+  async function downloadAll() {
+    if (!LAST || dlBusy) return;
+    dlBusy = true;
+    var D = LAST, btn = el('roll-dl'), lab0 = btn.textContent, MAXR = 400000, chunks = [], HEAD = ['Holding length (months)', 'Window start', 'Window end', 'Rank', 'Strategy', 'Filter', 'Weight 12m', 'Weight 6m', 'Weight 3m', 'Weight 1m', 'Weight calm', 'Weight 12m per risk', 'Weight 6m per risk', 'Weight 3m per risk', 'Growth in window %', 'Yearly growth %', 'List growth in window %', 'List yearly growth %', 'Worst fall %', 'List worst fall %', 'Months won %', 'Beat list with smaller fall', 'Stocks per month', 'Stock source', 'Basis'], parts = [], cur = ['﻿' + HEAD.map(csvCell).join(',') + '\r\n'], curRows = 0, nWin = 0, wDone = 0;
     var pct = function (v) { return isFinite(v) ? (v * 100).toFixed(2) : ''; };
-    D.lens.forEach(function (L) {
-      D.res[L].wins.forEach(function (w) {
-        w.full.forEach(function (it, ri) {
-          var r2 = D.recs[it.i], x = it.x || { cagr: it.w.cagr, bcagr: it.w.bcagr, dd: it.w.dd, bdd: it.w.bdd, win: it.w.win };
-          var g = function (c) { return Math.pow(1 + c, L / 12) - 1; };
-          var ok = x.cagr > x.bcagr && (L < 12 ? x.dd >= x.bdd : x.dd > x.bdd);
-          rows.push([L, lbl(w.s), lbl(w.s + L - 1), '#' + (ri + 1), r2.name, r2.filt ? 'ON' : 'OFF'].concat(WKEYS.map(function (k) { return r2.w[k]; }),
-            [pct(g(x.cagr)), pct(x.cagr), pct(g(x.bcagr)), pct(x.bcagr), pct(x.dd), pct(x.bdd), pct(x.win), ok ? 'Yes' : 'No', D.N, D.source]));
-        });
-      });
-    });
-    var csv = '\uFEFF' + rows.map(function (q) { return q.map(csvCell).join(','); }).join('\r\n') + '\r\n';
-    var url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), a = document.createElement('a');
-    a.href = url; a.download = 'rolling_window_ALL432_' + lbl(D.sFrom).replace(' ', '_') + '_to_' + lbl(D.sTo).replace(' ', '_') + '.csv';
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    btn.disabled = true;
+    try {
+      D.lens.forEach(function (L) { nWin += D.res[L].wins.length; });
+      for (var li = 0; li < D.lens.length; li++) {
+        var L = D.lens[li], R = D.res[L], M = D.recs.length, g = function (c) { return Math.pow(1 + c, L / 12) - 1; };
+        for (var k = 0; k < R.wins.length; k++) {
+          var w = R.wins[k], exact = {}, byRank = new Array(M), i, ri;
+          w.top5.forEach(function (it) { if (it.x) exact[it.i] = it.x; });
+          for (i = 0; i < M; i++) byRank[R.per[i].ws[k].rank - 1] = i;
+          var wl = lbl(w.s), we = lbl(w.s + L - 1);
+          for (ri = 0; ri < M; ri++) {
+            i = byRank[ri];
+            var z = R.per[i].ws[k], r2 = D.recs[i], fx = exact[i] || z.x, x = fx || z;
+            var ok = fx ? (x.cagr > x.bcagr && (L < 12 ? x.dd >= x.bdd : x.dd > x.bdd)) : z.ok;
+            cur.push([L, wl, we, '#' + (ri + 1), r2.name, r2.filt ? 'ON' : 'OFF'].concat(WKEYS.map(function (q) { return r2.w[q]; }),
+              [pct(g(x.cagr)), pct(x.cagr), pct(g(x.bcagr)), pct(x.bcagr), pct(x.dd), pct(x.bdd), pct(x.win), ok ? 'Yes' : 'No', D.N, D.source, fx ? 'Fresh start in window' : 'Continuous run']).map(csvCell).join(',') + '\r\n');
+          }
+          curRows += M; wDone++;
+          if (cur.length > 20000) { chunks.push(new Blob(cur)); cur = []; }
+          if (curRows >= MAXR) { chunks.push(new Blob(cur)); parts.push(new Blob(chunks, { type: 'text/csv' })); chunks = []; cur = ['﻿' + HEAD.map(csvCell).join(',') + '\r\n']; curRows = 0; }
+          if (Date.now() - lastY > 80) { lastY = Date.now(); btn.textContent = 'Preparing CSV ' + Math.round(100 * wDone / nWin) + '%'; await new Promise(function (r) { setTimeout(r, 0); }); }
+        }
+      }
+      if (curRows > 0 || !parts.length) { chunks.push(new Blob(cur)); parts.push(new Blob(chunks, { type: 'text/csv' })); chunks = []; cur = []; }
+      var base = 'rolling_window_ALL432_' + lbl(D.sFrom).replace(' ', '_') + '_to_' + lbl(D.sTo).replace(' ', '_');
+      for (var j = 0; j < parts.length; j++) {
+        btn.textContent = parts.length > 1 ? 'Saving file ' + (j + 1) + ' of ' + parts.length : 'Saving...';
+        var url = URL.createObjectURL(parts[j]), a = document.createElement('a');
+        a.href = url; a.download = base + (parts.length > 1 ? '_part' + (j + 1) + 'of' + parts.length : '') + '.csv';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout((function (u) { return function () { URL.revokeObjectURL(u); }; })(url), 30000);
+        if (j < parts.length - 1) await new Promise(function (r) { setTimeout(r, 900); });
+      }
+    } catch (e) {
+      setOut(errBox('Could not build the CSV: ' + e.message + ' Try fewer holding lengths or a shorter period.'));
+    } finally { dlBusy = false; btn.disabled = false; btn.textContent = lab0; }
   }
 
   function mount() {
@@ -1538,7 +1560,8 @@ var ROLL_JS = String.raw`
       '<div class="field full"><div class="lab"><label>Holding lengths</label></div><div class="chips">' +
       LENS.map(function (L) { return '<label class="check" style="display:inline-flex;align-items:center;gap:6px;min-height:36px"><input type="checkbox" class="roll-len" value="' + L + '"' + (L === 12 ? ' checked' : '') + ' style="width:20px;height:20px;min-height:0"> ' + (L === 1 ? '1 month' : L + ' months') + '</label>'; }).join('') +
       '</div></div>' +
-      '<div class="field"><div class="lab"><label for="roll-top">Strategies shown on screen per window (the CSV download always has all 432)</label></div><select id="roll-top"><option value="1">Best 1</option><option value="3">Best 3</option><option value="5" selected>Best 5</option><option value="all">All 432 (long page)</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="roll-top">Strategies shown on screen per window (the CSV download always has all 432)</label></div><select id="roll-top"><option value="1">Best 1</option><option value="3">Best 3</option><option value="5" selected>Best 5</option></select></div>' +
+      '<div class="field full"><label class="check" style="display:flex;align-items:center;gap:8px;min-height:36px"><input type="checkbox" id="roll-exact" style="width:20px;height:20px;min-height:0"> Exact fresh-start check for all 432 in the CSV (much slower; leave off for big runs)</label></div>' +
       '<div class="field"><div class="lab"><label for="roll-goal">Rank by</label></div><select id="roll-goal"><option value="cagr">Most growth</option><option value="calmar">Growth per unit of fall</option><option value="fall">Smallest fall</option></select></div>' +
       '<div class="field"><div class="lab"><label for="roll-anchor">Anchor window starts (month)</label></div><input id="roll-anchor" type="date" value="2015-01-01"></div>' +
       '</div>' +
@@ -1565,7 +1588,7 @@ var ROLL_JS = String.raw`
     }
     curP = P; el('roll-dl').hidden = true;
     var ticked = $$('.roll-len').filter(function (x) { return x.checked; }).map(function (x) { return +x.value; });
-    var anchor = ym('roll-anchor'), sFrom = ym('roll-from'), sTo = ym('roll-to'), goal = el('roll-goal').value, showAll = el('roll-top').value === 'all', topK = showAll ? 5 : (+el('roll-top').value || 1);
+    var anchor = ym('roll-anchor'), sFrom = ym('roll-from'), sTo = ym('roll-to'), goal = el('roll-goal').value, topK = Math.min(5, +el('roll-top').value || 1), exactAll = !!(el('roll-exact') && el('roll-exact').checked);
     if (!ticked.length) { setOut(errBox('Tick at least one holding length.')); return; }
     if (!isFinite(sFrom) || !isFinite(sTo) || sTo < sFrom) { setOut(errBox('Set the period start on or before the period end.')); return; }
     var span = sTo - sFrom + 1;
@@ -1573,7 +1596,9 @@ var ROLL_JS = String.raw`
     if (!lens.length) { setOut(errBox('Your period is only ' + span + ' months long, shorter than every length you ticked. Widen the period (for 12 months use at least 12 months, for 24 months at least 24).')); return; }
     var N = Math.round(val('pk-n', 10, 1, 20)), cost = val('pk-cost', 0.25, 0, 5);
     var ex = PK_OPT.exit > 0 ? Math.max(PK_OPT.exit, N + 1) : 0, wts = weightsFor(PK_WM, N);
-    var cands = genCands(), recs = [], saveW = PK_W, saveF = PK_FILTOV, total = cands.length * 2, done = 0;
+    var cands = genCands(), recs = [], saveW = PK_W, saveF = PK_FILTOV, total = cands.length * 2, done = 0, estRows = 0;
+    lens.forEach(function (L) { estRows += Math.max(0, span - L + 1) * total; });
+    if (estRows > 3000000) { setOut(errBox('This would make about ' + estRows.toLocaleString() + ' CSV rows, too many for one browser tab. Tick fewer holding lengths (the short ones make the most windows) or shorten the period, then run again.')); return; }
     busy = true; PK_FILTOV = '';
     try {
       for (var ci = 0; ci < cands.length; ci++) {
@@ -1584,36 +1609,41 @@ var ROLL_JS = String.raw`
           done++;
           if (!q.err) recs.push({ w: cands[ci], filt: f, name: stratName(cands[ci]), rows: q.rows });
         }
-        if (ci % 6 === 0) { setOut('<p class="note">Testing strategies: ' + done + ' of ' + total + '. Please keep this page open...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
+        await tick('Testing strategies: ' + done + ' of ' + total + '. The CSV will have about ' + estRows.toLocaleString() + ' rows.');
       }
       if (!recs.length) { setOut(errBox('Too few months of results in that period. Move the period or add stocks with longer history.')); return; }
-      if (showAll) topK = recs.length;
       var b0 = P.lo + recs[0].rows[0].k + 1, bEnd = b0 + recs[0].rows.length - 1, res = {};
-      lens.forEach(function (L) {
-        var wins = [], per = recs.map(function () { return { ok: 0, n: 0, cg: [], dd: [], ws: [] }; });
+      for (var li = 0; li < lens.length; li++) {
+        var L = lens[li], wins = [], per = recs.map(function () { return { ok: 0, n: 0, cg: [], dd: [], ws: [] }; });
         for (var s = sFrom; s + L - 1 <= sTo; s++) {
           var a = s - b0;
           if (a < 0 || a + L > recs[0].rows.length) continue;
           var all = recs.map(function (r, i) {
             var w = winStats(r.rows, a, L), ok = w.cagr > w.bcagr && (L < 12 ? w.dd >= w.bdd : w.dd > w.bdd);
-            per[i].n++; if (ok) per[i].ok++; per[i].cg.push(w.cagr); per[i].dd.push(w.dd); per[i].ws.push({ s: s, cagr: w.cagr, bcagr: w.bcagr, dd: w.dd, bdd: w.bdd, win: w.win, ok: ok });
+            per[i].n++; if (ok) per[i].ok++; per[i].cg.push(w.cagr); per[i].dd.push(w.dd); per[i].ws.push({ i: i, s: s, cagr: w.cagr, bcagr: w.bcagr, dd: w.dd, bdd: w.bdd, win: w.win, ok: ok, rank: 0 });
             return { i: i, w: w, ok: ok, sc: goalScore(w, goal) };
           });
           all.sort(function (x, y) { return ((y.ok ? 1 : 0) - (x.ok ? 1 : 0)) || (y.sc - x.sc); });
-          wins.push({ s: s, list: all.slice(0, topK), top5: all.slice(0, 5), full: all, anyOk: all[0].ok, nOk: all.filter(function (z) { return z.ok; }).length });
+          all.forEach(function (z, rk) { var wsl = per[z.i].ws; wsl[wsl.length - 1].rank = rk + 1; });
+          wins.push({ s: s, list: all.slice(0, topK), top5: all.slice(0, 5), anyOk: all[0].ok, nOk: all.filter(function (z) { return z.ok; }).length });
+          await tick('Scoring ' + L + '-month windows: ' + wins.length + ' done.');
         }
         res[L] = { wins: wins, per: per };
-      });
+      }
       /* exact re-run of each listed strategy from its own start month (fresh portfolio) */
       var ids = [];
-      lens.forEach(function (L) { res[L].wins.forEach(function (w) { w.full.forEach(function (it) { ids.push([L, w, it]); }); }); });
+      lens.forEach(function (L) { res[L].wins.forEach(function (w, wk) {
+        var inTop = {};
+        w.top5.forEach(function (it) { inTop[it.i] = 1; ids.push([L, w, it]); });
+        if (exactAll) res[L].per.forEach(function (pp, i) { if (!inTop[i]) ids.push([L, w, pp.ws[wk]]); });
+      }); });
       for (var k = 0; k < ids.length; k++) {
         var L2 = ids[k][0], wn = ids[k][1], it = ids[k][2], rc = recs[it.i];
         PK_W = Object.assign({}, rc.w, { filt: rc.filt });
         var q2 = portSim(P, S, 'custom', N, ex, cost, PK_OPT.rg, PK_OPT.rgL, wn.s, wn.s + L2 - 1, PK_OPT.sl, wts);
         dropCustom(P);
         if (!q2.err) { var wc = 0; q2.rows.forEach(function (r) { if (r.ret > r.bench) wc++; }); it.x = { cagr: q2.cagr, bcagr: q2.bcagr, dd: q2.dd, bdd: q2.bdd, win: wc / q2.rows.length }; }
-        if (k % 40 === 0) { setOut('<p class="note">Checking results: ' + k + ' of ' + ids.length + '...</p>'); await new Promise(function (r) { setTimeout(r, 0); }); }
+        await tick('Checking results: ' + k + ' of ' + ids.length + '.');
       }
       LAST = { res: res, lens: lens, recs: recs, N: N, sFrom: sFrom, sTo: sTo, source: UNI ? UNI.name + ' (' + P.syms.length + ' stocks)' : 'Loaded list (' + P.syms.length + ' stocks)' };
       setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor));
@@ -1624,7 +1654,7 @@ var ROLL_JS = String.raw`
   }
 
   function render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor) {
-    var h = '<p class="note">Tested ' + recs.length + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month from ' + (UNI ? 'your ZIP (' + esc(UNI.name) + ', ' + curP.syms.length + ' stocks)' : 'the loaded list (' + curP.syms.length + ' stocks)') + ', period ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Use Download all 432 strategies above for a CSV that lists every strategy, ranked, in every window. Tap a row to load that strategy into My own blend.</p>';
+    var h = '<p class="note">Tested ' + recs.length + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month from ' + (UNI ? 'your ZIP (' + esc(UNI.name) + ', ' + curP.syms.length + ' stocks)' : 'the loaded list (' + curP.syms.length + ' stocks)') + ', period ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Use Download all 432 strategies above for a CSV that lists every strategy, ranked, in every window (big files are split into parts of 400,000 rows). Tap a row to load that strategy into My own blend.</p>';
     if (skipped.length) h += errBox('Skipped ' + skipped.join(', ') + ' months: your period is shorter than that. Widen the period to include them.');
     if (bEnd < sTo) h += errBox('Your price data ends at ' + lbl(bEnd) + ', before the period end, so the last windows are missing.');
     var overall = recs.map(function () { return { sum: 0, c: 0 }; });
