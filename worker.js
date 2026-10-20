@@ -1560,7 +1560,7 @@ var ROLL_JS = String.raw`
       '<div class="field full"><div class="lab"><label>Holding lengths</label></div><div class="chips">' +
       LENS.map(function (L) { return '<label class="check" style="display:inline-flex;align-items:center;gap:6px;min-height:36px"><input type="checkbox" class="roll-len" value="' + L + '"' + (L === 12 ? ' checked' : '') + ' style="width:20px;height:20px;min-height:0"> ' + (L === 1 ? '1 month' : L + ' months') + '</label>'; }).join('') +
       '</div></div>' +
-      '<div class="field"><div class="lab"><label for="roll-top">Strategies shown on screen per window (the CSV download always has all 432)</label></div><select id="roll-top"><option value="1">Best 1</option><option value="3">Best 3</option><option value="5" selected>Best 5</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="roll-top">Strategies per window on screen (page shows about 10 lines; the CSV has all 432)</label></div><select id="roll-top"><option value="1">Best 1</option><option value="3">Best 3</option><option value="5" selected>Best 5</option></select></div>' +
       '<div class="field full"><label class="check" style="display:flex;align-items:center;gap:8px;min-height:36px"><input type="checkbox" id="roll-exact" style="width:20px;height:20px;min-height:0"> Exact fresh-start check for all 432 in the CSV (much slower; leave off for big runs)</label></div>' +
       '<div class="field"><div class="lab"><label for="roll-goal">Rank by</label></div><select id="roll-goal"><option value="cagr">Most growth</option><option value="calmar">Growth per unit of fall</option><option value="fall">Smallest fall</option></select></div>' +
       '<div class="field"><div class="lab"><label for="roll-anchor">Anchor window starts (month)</label></div><input id="roll-anchor" type="date" value="2015-01-01"></div>' +
@@ -1646,14 +1646,16 @@ var ROLL_JS = String.raw`
         await tick('Checking results: ' + k + ' of ' + ids.length + '.');
       }
       LAST = { res: res, lens: lens, recs: recs, N: N, sFrom: sFrom, sTo: sTo, source: UNI ? UNI.name + ' (' + P.syms.length + ' stocks)' : 'Loaded list (' + P.syms.length + ' stocks)' };
-      setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor));
       el('roll-dl').hidden = false;
+      try { setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor)); }
+      catch (e2) { setOut('<p class="headline">Finished. ' + recs.length + ' strategies were scored in every window.</p><p class="note">The list is too big to show here. Use Download all 432 strategies (CSV) above. (' + esc(e2.message) + ')</p>'); }
     } catch (e) {
       setOut(errBox('Something went wrong: ' + e.message));
     } finally { PK_W = saveW; PK_FILTOV = saveF; busy = false; }
   }
 
   function render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor) {
+    var showK = Math.min(topK, 5), CAP = 10;
     var h = '<p class="note">Tested ' + recs.length + ' strategies (formulas with filter ON and OFF), ' + N + ' stocks per month from ' + (UNI ? 'your ZIP (' + esc(UNI.name) + ', ' + curP.syms.length + ' stocks)' : 'the loaded list (' + curP.syms.length + ' stocks)') + ', period ' + lbl(sFrom) + ' to ' + lbl(sTo) + '. Use Download all 432 strategies above for a CSV that lists every strategy, ranked, in every window (big files are split into parts of 400,000 rows). Tap a row to load that strategy into My own blend.</p>';
     if (skipped.length) h += errBox('Skipped ' + skipped.join(', ') + ' months: your period is shorter than that. Widen the period to include them.');
     if (bEnd < sTo) h += errBox('Your price data ends at ' + lbl(bEnd) + ', before the period end, so the last windows are missing.');
@@ -1667,10 +1669,11 @@ var ROLL_JS = String.raw`
       wins.forEach(function (w) { cnt[w.list[0].i] = (cnt[w.list[0].i] || 0) + 1; });
       var top = Object.keys(cnt).sort(function (a, b) { return cnt[b] - cnt[a]; }).slice(0, 3);
       h += '<p class="headline">In <b class="' + (okN === wins.length ? 'good' : (okN ? 'warn' : 'bad')) + '">' + okN + ' of ' + wins.length + '</b> windows some strategy beat the list with a smaller fall. Most frequent best: <b>' + nm(recs[top[0]]) + '</b>, in ' + cnt[top[0]] + ' windows.</p>';
+      h += '<p class="note">Only the first ' + (Math.max(1, Math.floor(CAP / showK)) * showK) + ' lines of the window list are shown here. All ' + wins.length + ' windows x ' + recs.length + ' strategies are in the CSV (Download button above).</p>';
       if (top.length > 1) h += '<p class="note">Also best often: ' + top.slice(1).map(function (i) { return nm(recs[i]) + ' (' + cnt[i] + ')'; }).join('; ') + '.</p>';
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Window</th><th>Rank</th><th class="wrap">Strategy</th><th>' + gl + ' (list)</th><th>Worst fall (list)</th><th>Months won</th><th>Beat list?</th></tr></thead><tbody>' +
-        wins.map(function (w) {
-          return w.list.map(function (it, ri) {
+        wins.slice(0, Math.max(1, Math.floor(CAP / showK))).map(function (w) {
+          return w.list.slice(0, showK).map(function (it, ri) {
             var r = recs[it.i], x = it.x || { cagr: it.w.cagr, bcagr: it.w.bcagr, dd: it.w.dd, bdd: it.w.bdd, win: it.w.win };
             return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + (ri === 0 ? lbl(w.s) + ' to ' + lbl(w.s + L - 1) + '<br><span class="muted">' + w.nOk + ' strategies beat the list</span>' : '') + '</th><td>#' + (ri + 1) + '</td><td class="wrap">' + nm(r) + '</td><td><span class="' + tone(x.cagr) + '">' + pc(G(x.cagr), 1, true) + '</span> (' + pc(G(x.bcagr), 1, true) + ')</td><td><span class="bad">' + pc(x.dd, 0) + '</span> (' + pc(x.bdd, 0) + ')</td><td>' + pc(x.win, 0) + '</td><td class="' + (it.ok ? 'good' : 'bad') + '">' + (it.ok ? 'Yes' : 'No') + '</td></tr>';
           }).join('');
@@ -1712,11 +1715,11 @@ var ROLL_JS = String.raw`
       if (allOk.length) {
         h += '<p class="headline"><b class="good">' + allOk.length + '</b> of ' + recs.length + ' strategies beat the list, with a smaller fall, in every one of the ' + nW + ' windows. Best by median growth: <b>' + nm(recs[allOk[0].i]) + '</b>.</p>';
         h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Strategy</th><th>Windows beaten</th><th>Median growth</th><th>Median fall</th><th>Worst window growth</th></tr></thead><tbody>' +
-          allOk.slice(0, 25).map(function (x) {
+          allOk.slice(0, CAP).map(function (x) {
             var r = recs[x.i];
             return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + nm(r) + '</th><td class="good">' + x.p.ok + ' of ' + x.p.n + '</td><td class="' + tone(x.mc) + '">' + pc(G(x.mc), 1, true) + '</td><td class="bad">' + pc(x.md, 0) + '</td><td class="' + tone(x.wc) + '">' + pc(G(x.wc), 1, true) + '</td></tr>';
           }).join('') + '</tbody></table></div>';
-        if (allOk.length > 25) h += '<p class="note">Showing the best 25 of ' + allOk.length + ' by median growth.</p>';
+        if (allOk.length > CAP) h += '<p class="note">Showing the best ' + CAP + ' of ' + allOk.length + ' by median growth. The CSV has every strategy.</p>';
       } else {
         h += '<p class="headline"><b class="bad">No strategy</b> beat the list in all ' + nW + ' windows. The closest is <b>' + nm(recs[rank[0].i]) + '</b> with ' + rank[0].p.ok + ' of ' + rank[0].p.n + '.</p>';
       }
@@ -1726,11 +1729,13 @@ var ROLL_JS = String.raw`
       wins.forEach(function (w, k) { if (w.s === anchor) ai = k; });
       var aMiss = ai < 0; if (aMiss) ai = 0;
       var aw = wins[ai], aList = aw.list.slice(0, 3);
-      h += '<h3>Anchor window: ' + lbl(aw.s) + ' to ' + lbl(aw.s + L - 1) + '</h3>';
+      h += '<h3>Anchor window: ' + lbl(aw.s) + ' to ' + lbl(aw.s + L - 1) + '</h3>' + (wins.length > CAP ? '<p class="note">Showing ' + CAP + ' of ' + wins.length + ' windows around the anchor.</p>' : '');
       if (aMiss && isFinite(anchor)) h += '<p class="note">No ' + L + '-month window starts in ' + lbl(anchor) + ' inside your period, so the first window is used.</p>';
       h += '<p class="headline">Best strategy of this window: <b>' + nm(recs[aList[0].i]) + '</b>. It beat the list in <b class="' + (per[aList[0].i].ok === per[aList[0].i].n ? 'good' : 'warn') + '">' + per[aList[0].i].ok + ' of ' + per[aList[0].i].n + '</b> windows.</p>';
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Window</th><th>List</th>' + aList.map(function (it, q) { return '<th class="wrap">#' + (q + 1) + ' ' + nm(recs[it.i]) + '</th>'; }).join('') + '</tr></thead><tbody>' +
         wins.map(function (w, k) {
+          var a0 = Math.max(0, Math.min(ai - 4, wins.length - CAP));
+          if (k < a0 || k >= a0 + CAP) return '';
           return '<tr class="' + (k === ai ? 'on' : '') + '"><th class="wrap">' + lbl(w.s) + ' to ' + lbl(w.s + L - 1) + '</th><td>' + pc(G(per[aList[0].i].ws[k].bcagr), 1, true) + '</td>' +
             aList.map(function (it) { var z = per[it.i].ws[k]; return '<td class="' + (z.ok ? 'good' : 'bad') + '">' + pc(G(z.cagr), 1, true) + ' (fall ' + pc(z.dd, 0) + ')</td>'; }).join('') + '</tr>';
         }).join('') +
@@ -1738,9 +1743,9 @@ var ROLL_JS = String.raw`
       h += '<p class="note">Green means that strategy beat the list with a smaller fall in that window, red means it did not. Growth is yearly growth for windows of 12 months or more, and growth in the window itself for shorter ones. Change Anchor window starts to look at any other month.</p>';
 
       /* C. every window's best strategy, and how it did in all the other windows */
-      h += '<h3>Each window\'s best strategy, tested in all windows</h3>';
+      h += '<h3>Each window\'s best strategy, tested in all windows</h3>' + (wins.length > CAP ? '<p class="note">First ' + CAP + ' of ' + wins.length + ' windows shown. The rest is in the CSV.</p>' : '');
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Window</th><th class="wrap">Its best strategy</th><th>Windows beaten</th><th>Median growth</th></tr></thead><tbody>' +
-        wins.map(function (w) {
+        wins.slice(0, CAP).map(function (w) {
           var i = w.list[0].i, p = per[i], r = recs[i];
           return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th class="wrap">' + lbl(w.s) + ' to ' + lbl(w.s + L - 1) + '</th><td class="wrap">' + nm(r) + '</td><td class="' + (p.ok === p.n ? 'good' : (p.ok / p.n >= 0.5 ? '' : 'bad')) + '">' + p.ok + ' of ' + p.n + '</td><td class="' + tone(medianOf(p.cg)) + '">' + pc(G(medianOf(p.cg)), 1, true) + '</td></tr>';
         }).join('') + '</tbody></table></div>';
