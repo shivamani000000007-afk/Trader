@@ -2412,6 +2412,35 @@ var VOL = {};
       h += tb(['Chance over 12 months', 'Lose money (past)', 'Beat list (past)', 'Lose money (reshuffled)', 'Beat list (reshuffled)'], [['Overlap in all ' + cnt, ov1.ser.r], ['Overlap in ' + ovT.m + '+', ovT.ser.r], ['Split across ' + cnt, SA.r]].map(function (x) { var a = broll(x[1], SG.l, 12), bb = bboot(x[1], SG.l, 12, 4000, 77); return '<tr><th class="wrap">' + x[0] + '</th><td class="' + (a.lose > 0.3 ? 'bad' : '') + '">' + pc(a.lose, 0) + '</td><td>' + pc(a.win, 0) + '</td><td class="' + (bb.lose > 0.3 ? 'bad' : '') + '">' + pc(bb.lose, 0) + '</td><td>' + pc(bb.win, 0) + '</td></tr>'; }));
       h += '<p class="note">Fewer stocks usually means bigger swings. Check Biggest fall and the chance of losing, not only the yearly growth.</p>';
 
+      /* tilt toward overlap: weight = (number of strategies holding the stock) to the power p */
+      var wSeries = function (p, half) {
+        var r = [], prevW = {}, nsum = 0, i2;
+        for (i2 = 0; i2 < n; i2++) {
+          var kk2 = kF + rows[i2].t, co = {}, cand = [], fv = {};
+          osets[i2].forEach(function (st) { st.forEach(function (q) { co[q] = (co[q] || 0) + 1; }); });
+          Object.keys(co).forEach(function (q) { q = +q; var f = fwd(P, q, kk2, 1); if (isFinite(f)) { cand.push(q); fv[q] = f; } });
+          var w = {}, ret = 0, turn = 0, tot = 0, core = [], rest = [];
+          if (half) {
+            var thc = Math.max(2, Math.ceil(cnt * 0.6));
+            cand.forEach(function (q) { (co[q] >= thc ? core : rest).push(q); });
+            if (!core.length || !rest.length) { var all = core.concat(rest); all.forEach(function (q) { w[q] = 1 / all.length; }); }
+            else { core.forEach(function (q) { w[q] = 0.5 / core.length; }); rest.forEach(function (q) { w[q] = 0.5 / rest.length; }); }
+          } else {
+            cand.forEach(function (q) { w[q] = Math.pow(co[q], p); tot += w[q]; });
+            cand.forEach(function (q) { w[q] /= tot; });
+          }
+          if (!cand.length) { ret = rows[i2].l; }
+          else { Object.keys(w).forEach(function (q) { ret += w[q] * fv[q]; turn += Math.abs(w[q] - (prevW[q] || 0)); }); Object.keys(prevW).forEach(function (q) { if (w[q] === undefined) turn += prevW[q]; }); ret -= C.cost / 100 * 0.5 * turn; }
+          prevW = w; nsum += cand.length; r.push(ret);
+        }
+        return { r: r, avgN: nsum / n };
+      };
+      var wv = [['Equal money in every distinct stock (no tilt)', 0, false], ['Tilt 1: money share = strategies holding it (this is the split)', 1, false], ['Tilt 2: share grows with overlap squared', 2, false], ['Tilt 3: share grows with overlap cubed', 3, false], ['Half the money in stocks held by ' + Math.max(2, Math.ceil(cnt * 0.6)) + '+ strategies, half equal in the rest', 0, true]].map(function (x) { var q = wSeries(x[1], x[2]); return { name: x[0], q: q, a: bstat(q.r, SG.l), g: bstat(greenMix(q.r), SG.l), c: broll(q.r, SG.l, 12) }; });
+      h += '<h3>Tilting toward overlapping stocks</h3>';
+      h += '<p class="note">Here all ' + cnt + ' strategies keep their stocks and you put more money in the stocks several of them share. Every row uses each strategy’s fresh top ' + C.N + ' at month-end (no exit rank or stop-loss), so compare these rows with each other and not with the split row above, which does use your exit rank and stop-loss.</p>';
+      h += tb(['Money split', 'Per year', 'Total multiple', 'Beat list', 'Biggest fall', 'Lose money 12m (past)', 'Stocks held', 'Green rule per year'], wv.map(function (x) { return '<tr><th class="wrap">' + esc(x.name) + '</th><td class="' + tone(x.a.cagr) + '">' + pc(x.a.cagr, 1, true) + '</td><td>' + num(x.a.mult, 1) + 'x</td><td>' + pc(x.a.beat, 0) + '</td><td class="bad">' + pc(x.a.dd, 1, true) + '</td><td>' + pc(x.c.lose, 0) + '</td><td>' + num(x.q.avgN, 0) + '</td><td class="' + tone(x.g.cagr) + '">' + pc(x.g.cagr, 1, true) + '</td></tr>'; }));
+      h += '<p class="note">Stronger tilt means fewer effective stocks, so expect bigger swings. Look for a steady pattern across the rows, and check Biggest fall and Lose money, not only Per year.</p>';
+
       /* overlap and next month */
       say2(h + '<p class="note">Counting overlap between strategies...</p>'); await tick();
       var pkN = kpick(C, T, 0.6, cnt), gN = gate(lg, T);
