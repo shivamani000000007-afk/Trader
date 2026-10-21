@@ -2227,6 +2227,163 @@ var VOL = {};
   }
   mount();
 })();
+
+/* ===== Monthly strategy advisor: price, volume, indicators, 8 ingredients ===== */
+(function () {
+  var el = function (i) { return document.getElementById(i); }, FN = ['m12', 'm6c', 'vr', 'dv', 'trend', 'lv'];
+  var RC = [['Momentum core (12 and 6 month)', [['m12', 1], ['m6c', 1]]], ['Core + volume trend', [['m12', 1], ['m6c', 1], ['vr', 1]]], ['Core + smaller traded value', [['m12', 1], ['m6c', 1], ['dv', -1]]], ['Core + volume trend + smaller traded value', [['m12', 1], ['m6c', 1], ['vr', 1], ['dv', -1]]], ['Core + trend (above 10-month average)', [['m12', 1], ['m6c', 1], ['trend', 1]]], ['Core + low swings', [['m12', 1], ['m6c', 1], ['lv', 1]]]];
+  var LAST = null;
+  function factors(P) {
+    var n = P.syms.length, K = P.K, F = {}, s, k, j;
+    FN.forEach(function (f) { F[f] = []; });
+    for (s = 0; s < n; s++) {
+      var c = P.closes[s], vm = VOL[window.__vsym(P.syms[s])], A = {}, r = new Float64Array(K).fill(NaN);
+      FN.forEach(function (f) { A[f] = new Float64Array(K).fill(NaN); });
+      for (k = 1; k < K; k++) if (c[k] > 0 && c[k - 1] > 0) r[k] = c[k] / c[k - 1] - 1;
+      for (k = 0; k < K; k++) {
+        if (!(c[k] > 0)) continue;
+        if (k >= 12 && c[k - 1] > 0 && c[k - 12] > 0) A.m12[k] = c[k - 1] / c[k - 12] - 1;
+        if (k >= 6 && c[k - 6] > 0) A.m6c[k] = c[k] / c[k - 6] - 1;
+        if (k >= 9) { var sm = 0, ok = 0; for (j = k - 9; j <= k; j++) if (c[j] > 0) { sm += c[j]; ok++; } if (ok === 10) A.trend[k] = c[k] / (sm / 10) - 1; }
+        if (k >= 12) { var m1 = 0, m2 = 0, o = 0; for (j = k - 11; j <= k; j++) if (isFinite(r[j])) { m1 += r[j]; m2 += r[j] * r[j]; o++; } if (o === 12) { var sd = Math.sqrt(Math.max(m2 / 12 - m1 * m1 / 144, 0)); if (sd > 0) A.lv[k] = -sd; } }
+        var v = vm && vm[P.lo + k];
+        if (v > 0) { var sum = 0, ct = 0, i; for (i = 1; i <= 12; i++) { var x = vm[P.lo + k - i]; if (x > 0) { sum += x; ct++; } } if (ct >= 6) { A.vr[k] = v / (sum / ct); A.dv[k] = Math.log(v * c[k] + 1); } }
+      }
+      FN.forEach(function (f) { F[f].push(A[f]); });
+    }
+    return F;
+  }
+  function score(F, rec, k, n) {
+    var rk = rec.map(function (x) { var v = [], s; for (s = 0; s < n; s++) v.push(F[x[0]][s][k]); return pctRanks(v); }), out = new Array(n).fill(NaN), ok = 0;
+    for (var s = 0; s < n; s++) { var t = 0, g = 1; for (var q = 0; q < rec.length; q++) { var p = rk[q][s]; if (!isFinite(p)) { g = 0; break; } t += rec[q][1] > 0 ? p : 1 - p; } if (g) { out[s] = t; ok++; } }
+    return ok >= 10 ? out : null;
+  }
+  function mul(a, f) { return a.reduce(function (p, x) { return p * (1 + f(x)); }, 1); }
+  function yr(a, f) { return a.length ? Math.pow(mul(a, f), 12 / a.length) - 1 : NaN; }
+  function compute() {
+    var P = PK_CACHE && PK_CACHE.P;
+    if (!P) return { err: 'Load your stocks first and wait for the picks table to appear, then tap again.' };
+    var n = P.syms.length, K = +el('ad-n').value || 5, cost = 0.0025, F = factors(P), nv = P.syms.filter(function (s) { return VOL[window.__vsym(s)]; }).length;
+    var av = RC.map(function (r) { return r[1].every(function (x) { return (x[0] !== 'vr' && x[0] !== 'dv') || nv >= 10; }); });
+    var RES = RC.map(function () { return {}; }), MR = {}, k, ri, s;
+    for (k = 12; k < P.kSig; k++) {
+      var nx = new Float64Array(n).fill(NaN), ct = 0, ew = 0;
+      for (s = 0; s < n; s++) { var a = P.closes[s][k], b = P.closes[s][k + 1]; if (a > 0 && b > 0) { nx[s] = b / a - 1; ct++; ew += nx[s]; } }
+      if (ct < 10) continue;
+      MR[k] = { nx: nx, ew: ew / ct };
+      for (ri = 0; ri < RC.length; ri++) {
+        if (!av[ri]) continue;
+        var sc = score(F, RC[ri][1], k, n); if (!sc) continue;
+        var pk = topIdx(sc, K).filter(function (x) { return isFinite(nx[x]); }); if (pk.length < 3) continue;
+        RES[ri][k] = { pk: pk, r: pk.reduce(function (z, x) { return z + nx[x]; }, 0) / pk.length };
+      }
+    }
+    var ks = Object.keys(MR).map(Number).sort(function (x, y) { return x - y; });
+    if (ks.length < 48) return { err: 'Need at least 4 years of monthly prices. Load more history.' };
+    var kEval = ks[0] + 24;
+    function choose(kk) {
+      var best = -1, bm = -Infinity;
+      RC.forEach(function (r, i) { if (!av[i]) return; var sm = 0, c2 = 0, j; for (j = ks[0]; j < kk; j++) if (RES[i][j]) { sm += RES[i][j].r; c2++; } if (c2 >= 12 && sm / c2 > bm) { bm = sm / c2; best = i; } });
+      return best < 0 ? 0 : best;
+    }
+    var AD = [], prev = null;
+    ks.forEach(function (kk) {
+      if (kk < kEval) return;
+      var i = choose(kk), rr = RES[i][kk]; if (!rr) return;
+      var cur = {}; rr.pk.forEach(function (x) { cur[x] = 1; });
+      var turn = prev ? rr.pk.filter(function (x) { return !prev[x]; }).length / rr.pk.length : 1; prev = cur;
+      AD.push({ k: kk, ri: i, pk: rr.pk, r: rr.r, net: rr.r - 2 * cost * turn, ew: MR[kk].ew });
+    });
+    var iN = choose(P.kSig), scN = score(F, RC[iN][1], P.kSig, n) || score(F, RC[0][1], P.kSig, n);
+    return { P: P, F: F, n: n, K: K, av: av, RES: RES, ks: ks, AD: AD, iN: iN, scN: scN, nv: nv };
+  }
+  function run() {
+    var C = compute(), out = el('ad-out');
+    if (C.err) { out.innerHTML = errBox(C.err); return; }
+    LAST = C;
+    var P = C.P, AD = C.AD, nb = AD.length, K = C.K, h = '';
+    var lab = function (k) { return monthLabel(P, k + 1); }, pkN = topIdx(C.scN, K), g = function (f, j) { return C.F[f][j][P.kSig]; };
+    h += '<h3>Invest for ' + esc(monthLabel(P, P.kSig + 1)) + '</h3><p class="note">Strategy formed from data to the end of ' + esc(monthLabel(P, P.kSig)) + ': <b>' + esc(RC[C.iN][0]) + '</b> (the recipe with the best average result on all earlier months).' + (C.nv < 10 ? ' Volume is not loaded, so volume recipes were skipped.' : '') + '</p>';
+    h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Stock</th><th>12-1 mo</th><th>6 mo</th><th>Volume vs avg</th><th>Trend</th></tr></thead><tbody>' + pkN.map(function (j, i) {
+      return '<tr><th class="wrap">' + (i + 1) + '. ' + esc(P.syms[j]) + '</th><td class="' + tone(g('m12', j)) + '">' + pc(g('m12', j), 0, true) + '</td><td class="' + tone(g('m6c', j)) + '">' + pc(g('m6c', j), 0, true) + '</td><td>' + (isFinite(g('vr', j)) ? num(g('vr', j), 2) + 'x' : '-') + '</td><td class="' + tone(g('trend', j)) + '">' + pc(g('trend', j), 0, true) + '</td></tr>';
+    }).join('') + '</tbody></table></div><p class="note">Equal money in each stock. Hold one month, then run again at the next month end: it re-forms the strategy from all months up to then, so in December it uses October and November too.</p>';
+    var net = function (x) { return x.net; }, ew = function (x) { return x.ew; };
+    h += '<h3>Backtest: ' + esc(lab(AD[0].k)) + ' to ' + esc(lab(AD[nb - 1].k)) + ' (' + nb + ' months, ' + C.n + ' stocks, cost 0.25% each way)</h3><p class="note">Each month the recipe is chosen again using only earlier months.</p>';
+    var rows = [['All stocks equal (the list)', AD, ew], ['<b>Advisor (re-formed every month)</b>', AD, net]];
+    RC.forEach(function (r, i) { if (!C.av[i]) return; var fx = AD.map(function (x) { var q = C.RES[i][x.k]; return q ? { net: q.r, ew: x.ew } : null; }).filter(Boolean); rows.push(['Always: ' + esc(r[0]), fx, function (x) { return x.net; }]); });
+    h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Way to invest</th><th>Per year</th><th>Total multiple</th></tr></thead><tbody>' + rows.map(function (r) { var v = yr(r[1], r[2]), m = mul(r[1], r[2]); return '<tr><th class="wrap">' + r[0] + '</th><td class="' + tone(v) + '">' + pc(v, 1, true) + '</td><td>' + num(m, 1) + 'x</td></tr>'; }).join('') + '</tbody></table></div>';
+    var by = {}, wins = 0; AD.forEach(function (x) { var y = Math.floor((P.lo + x.k + 1) / 12); (by[y] = by[y] || []).push(x); });
+    var yl = Object.keys(by).sort();
+    h += '<h3>Year by year</h3><div class="scroll"><table class="tbl"><thead><tr><th>Year</th><th>List</th><th>Advisor</th></tr></thead><tbody>' + yl.map(function (y) { var a = by[y], p = mul(a, net) - 1, l = mul(a, ew) - 1; if (p > l) wins++; return '<tr><th>' + y + (a.length < 12 ? ' (' + a.length + ' mo)' : '') + '</th><td class="' + tone(l) + '">' + pc(l, 0, true) + '</td><td class="' + tone(p) + '">' + pc(p, 0, true) + '</td></tr>'; }).join('') + '</tbody></table></div>';
+    var a12 = AD.slice(-12), adY = yr(AD, net), lsY = yr(AD, ew), use = {}; AD.forEach(function (x) { use[x.ri] = (use[x.ri] || 0) + 1; });
+    var top = Object.keys(use).sort(function (a, b) { return use[b] - use[a]; })[0], bw = 0, bwv = -Infinity;
+    RC.forEach(function (r, i) { if (!C.av[i]) return; var v = yr(AD.map(function (x) { var q = C.RES[i][x.k]; return q ? { net: q.r } : { net: 0 }; }), net); if (v > bwv) { bwv = v; bw = i; } });
+    var cm = ['Re-forming the strategy each month from earlier data grew ' + pc(adY, 1) + ' a year against ' + pc(lsY, 1) + ' for the list, and beat the list in ' + wins + ' of ' + yl.length + ' years.',
+      'The best single recipe, known only with hindsight, was "' + RC[bw][0] + '" at ' + pc(bwv, 1) + '. The advisor used "' + RC[top][0] + '" in ' + pc(use[top] / nb, 0) + ' of months.',
+      'Last 12 months: advisor ' + pc(mul(a12, net) - 1, 0, true) + ', list ' + pc(mul(a12, ew) - 1, 0, true) + '. ' + (mul(a12, net) < mul(a12, ew) ? 'The advisor lagged recently, so do not treat the long-run result as a promise.' : 'The advisor is keeping its lead recently.'),
+      'Limits: your stocks are today\u2019s stocks, so old months look better than real time would have. Smaller traded value favors less liquid names. The recipes were designed after seeing these months. News is not included yet. Research tool, not investment advice.'];
+    h += '<h3>Results and comments</h3>' + cm.map(function (x) { return '<p class="note">' + esc(x) + '</p>'; }).join('');
+    out.innerHTML = h;
+  }
+  function csv(head, rows) { return head.join(',') + '\n' + rows.map(function (r) { return r.map(function (v) { v = (v == null || (typeof v === 'number' && !isFinite(v))) ? '' : String(typeof v === 'number' ? Math.round(v * 1e6) / 1e6 : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(','); }).join('\n') + '\n'; }
+  function key(id) { var m = /^(\d{4})-(\d{2})/.exec(el(id).value || ''); return m ? (+m[1]) * 12 + (+m[2]) - 1 : NaN; }
+  function save(text, name) { var u = URL.createObjectURL(new Blob([text], { type: 'text/csv' })), a = document.createElement('a'); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(u); }, 5000); }
+  function dl(kind) {
+    var say = el('ad-st'); if (!LAST) run(); if (!LAST) { say.textContent = 'Run the advisor first.'; return; }
+    var C = LAST, P = C.P, a = key('ad-f'), b = key('ad-t'); if (!(a <= b)) { say.textContent = 'Check the dates: start must be before end.'; return; }
+    var rows = [], head, name;
+    if (kind === 'picks') {
+      head = ['Month held', 'Strategy formed from earlier months'].concat(Array.apply(null, Array(C.K)).map(function (z, i) { return 'Stock ' + (i + 1); })).concat(['Gain before costs', 'Gain after costs', 'List']);
+      C.AD.forEach(function (x) { var m = P.lo + x.k + 1; if (m < a || m > b) return; rows.push([Math.floor(m / 12) + '-' + ('0' + (m % 12 + 1)).slice(-2), RC[x.ri][0]].concat(x.pk.map(function (j) { return P.syms[j]; })).concat([x.r, x.net, x.ew])); });
+      name = 'monthly_picks';
+    } else {
+      head = ['Symbol', 'Month', 'm12 (12-1 month)', 'm6 (6 month)', 'volume vs 12m avg', 'log traded value', 'trend vs 10m avg', 'calm (low swings)'];
+      for (var k = 0; k <= P.kSig; k++) { var m2 = P.lo + k; if (m2 < a || m2 > b) continue; for (var s = 0; s < C.n; s++) if (P.closes[s][k] > 0) rows.push([P.syms[s], Math.floor(m2 / 12) + '-' + ('0' + (m2 % 12 + 1)).slice(-2), C.F.m12[s][k], C.F.m6c[s][k], C.F.vr[s][k], C.F.dv[s][k], C.F.trend[s][k], C.F.lv[s][k]]); }
+      name = 'ingredients_volume_indicators';
+    }
+    save(csv(head, rows), name + '_' + el('ad-f').value + '_to_' + el('ad-t').value + '.csv'); say.textContent = 'Saved ' + rows.length + ' rows.';
+  }
+  async function zips(files) {
+    var out = [];
+    for (var fi = 0; fi < files.length; fi++) {
+      var f = files[fi]; if (!/\.zip$/i.test(f.name)) { out.push(f); continue; }
+      var buf = new Uint8Array(await f.arrayBuffer()), dv = new DataView(buf.buffer), i, e = -1;
+      for (i = buf.length - 22; i >= Math.max(0, buf.length - 65600); i--) if (dv.getUint32(i, true) === 0x06054b50) { e = i; break; }
+      if (e < 0) throw new Error(f.name + ' is not a ZIP file I can read.');
+      var cnt = dv.getUint16(e + 10, true), p = dv.getUint32(e + 16, true), dec = new TextDecoder();
+      for (i = 0; i < cnt; i++) {
+        if (dv.getUint32(p, true) !== 0x02014b50) break;
+        var meth = dv.getUint16(p + 10, true), csz = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true), nm = dec.decode(buf.subarray(p + 46, p + 46 + nl));
+        p += 46 + nl + xl + cl; if (/\/$/.test(nm) || /^__MACOSX/.test(nm) || !/\.(csv|txt)$/i.test(nm)) continue;
+        var ds = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true), raw = buf.subarray(ds, ds + csz), data;
+        if (meth === 0) data = raw; else if (meth === 8) data = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); else throw new Error('Unsupported ZIP compression in ' + nm);
+        out.push(new File([data], nm.split('/').pop(), { type: 'text/csv' }));
+      }
+    }
+    return out;
+  }
+  function mount() {
+    var tab = el('tab-pk'), anchor = el('out-pk'); if (!tab || !anchor) return setTimeout(mount, 600);
+    if (el('ad-card')) return;
+    var c = document.createElement('div'), t = new Date(); c.className = 'card'; c.id = 'ad-card';
+    c.innerHTML = '<h2>Monthly strategy advisor</h2><p class="note">Forms a strategy each month from the months before it, using price, volume, trend and the ingredients (12, 6 month momentum, calm). Picks stocks for next month and backtests the same method. Load prices and volume first (the volume card above fetches them online), or upload CSV or ZIP files here.</p>' +
+      '<div class="row"><label class="btn ghost" for="ad-file">Upload CSV or ZIP files</label><input id="ad-file" type="file" multiple accept=".csv,.txt,.zip" hidden><button type="button" class="btn" id="ad-run">Run strategy and backtest</button></div>' +
+      '<div class="fields"><div class="field full"><div class="lab"><label for="ad-n">Stocks to hold</label></div><select id="ad-n"><option value="5">Top 5</option><option value="10">Top 10</option><option value="3">Top 3</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="ad-f">Download from</label></div><input id="ad-f" type="date" value="2020-01-01"></div><div class="field"><div class="lab"><label for="ad-t">Download to</label></div><input id="ad-t" type="date" value="' + t.toISOString().slice(0, 10) + '"></div></div>' +
+      '<div class="row"><button type="button" class="btn ghost" id="ad-d1">Download monthly picks</button><button type="button" class="btn ghost" id="ad-d2">Download ingredients, volume, indicators</button></div><p class="note" id="ad-st" role="status"></p><div id="ad-out" class="out"></div>';
+    tab.insertBefore(c, anchor);
+    ['input', 'change'].forEach(function (ev) { c.addEventListener(ev, function (e) { e.stopPropagation(); }); });
+    el('ad-run').addEventListener('click', run); el('ad-d1').addEventListener('click', function () { dl('picks'); }); el('ad-d2').addEventListener('click', function () { dl('ind'); });
+    el('ad-file').addEventListener('change', async function (e) {
+      var fs = Array.prototype.slice.call(e.target.files || []); e.target.value = ''; if (!fs.length) return;
+      el('ad-out').innerHTML = '<p class="note">Reading files...</p>';
+      try { var flat = await zips(fs), r = await window.__readFiles(flat); if (r.price && r.price.length && typeof pkAddFiles === 'function') pkAddFiles(r.price); el('ad-out').innerHTML = '<p class="note">' + esc((r.price ? r.price.length : 0) + ' price files and volume for ' + (r.vols || 0) + ' stocks added. Wait for the picks table to refresh, then tap Run.') + '</p>'; }
+      catch (er) { el('ad-out').innerHTML = errBox(er && er.message ? er.message : String(er)); }
+    });
+  }
+  mount();
+})();
+
 `;
 
 export default {
