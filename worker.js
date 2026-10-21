@@ -2228,7 +2228,7 @@ var VOL = {};
   mount();
 
   /* ================= Split test tab: equal money in the picked strategies ================= */
-  var BL_SIZES = [1, 2, 3, 5, 8, 10, 15, 20], BLBUSY = false;
+  var BL_SIZES = [1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 35, 40], BLBUSY = false;
   function mulb(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; var t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
   function meanOf(a) { var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; return a.length ? s / a.length : NaN; }
   function bstat(r, l) {
@@ -2271,11 +2271,14 @@ var VOL = {};
     return { r: r, l: l };
   }
   function holdOf(C, rec, k) {
-    var P = C.P, S = C.S, saveW = PK_W, saveF = PK_FILTOV, out = [];
+    var P = C.P, S = C.S, saveW = PK_W, saveF = PK_FILTOV, out = [], ck = JSON.stringify(rec.w) + '|' + rec.filt + '|' + k;
+    C._hc = C._hc || {};
+    if (C._hc[ck]) return C._hc[ck];
     PK_FILTOV = ''; PK_W = Object.assign({}, rec.w, { filt: rec.filt });
     try { var sc = scoresAt(P, S, 'custom', k); if (sc) out = pickIdx(P, S, 'custom', k, sc, C.N) || []; }
     catch (e) { out = []; }
     finally { PK_W = saveW; PK_FILTOV = saveF; dropCustom(P); }
+    C._hc[ck] = out;
     return out;
   }
   function overlapInfo(C, pks, k) {
@@ -2304,8 +2307,10 @@ var VOL = {};
       '<p class="note">Each month the strategy picker chooses its best strategies using only earlier months. This test puts equal money in each of them (for example 5) and compares that with the plain list, with one single pick, and with a green light rule (split on green, hold the whole list on red). It also shows how often each way won or lost money, month by month and over longer windows.</p>' +
       '<p class="note" id="bl-ds" role="status"></p>' +
       '<div class="fields">' +
-      '<div class="field"><div class="lab"><label for="bl-n">Strategies to split across</label></div><select id="bl-n"><option value="2">2</option><option value="3">3</option><option value="5" selected>5</option><option value="8">8</option><option value="10">10</option><option value="15">15</option><option value="20">20</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="bl-n">Strategies to split across (2 to 40)</label></div><input id="bl-n" type="number" inputmode="numeric" min="2" max="40" step="1" value="5"></div>' +
       '<div class="field"><div class="lab"><label for="bl-sw">Cost each time the light changes colour (% of money)</label></div><input id="bl-sw" type="number" inputmode="decimal" min="0" max="5" step="0.05" value="0.5"></div>' +
+      '<div class="field"><div class="lab"><label for="bl-from">From month (blank = start)</label></div><input id="bl-from" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="bl-to">To month (blank = latest)</label></div><input id="bl-to" type="month"></div>' +
       '</div>' +
       '<div class="row"><button type="button" class="btn" id="bl-run">Run split test</button></div>' +
       '<div id="bl-out" class="out"></div></div>' +
@@ -2328,16 +2333,21 @@ var VOL = {};
       var C = await build(say2);
       if (C.err) { say2(errBox(C.err)); return; }
       var P = C.P, T = C.T, M = C.M, lg = C.lg, G = C.G, kF = C.kFirst, wt = weightsFor(PK_WM, C.N);
-      var cnt = Math.min(M, Math.max(2, Math.round(val('bl-n', 5, 2, 20)))), sw = val('bl-sw', 0.5, 0, 5);
+      var cnt = Math.min(M, Math.max(2, Math.round(val('bl-n', 5, 2, 40)))), sw = val('bl-sw', 0.5, 0, 5);
       var lab = function (t) { return monthLabel(P, kF + t + 1); };
-      var VS = volSeries(P, kF, T), kmax = Math.min(20, M), rows = [], t;
+      var VS = volSeries(P, kF, T), kmax = Math.min(40, M), rows = [], t;
       say2('<p class="note">Replaying every month...</p>'); await tick();
       for (t = 24; t < T; t++) { var g = gate(lg, t); rows.push({ t: t, g: G[t], pk: kpick(C, t, 0.6, kmax), on: g.on, rsi: g.rsi, v: VS.vr[t], l: lg[t] }); }
+      var mkey = function (id) { var m = /^(\d{4})-(\d{2})/.exec((el(id) || {}).value || ''); return m ? (+m[1]) * 12 + (+m[2]) - 1 : NaN; };
+      var fk = mkey('bl-from'), tk = mkey('bl-to'), allN = rows.length;
+      rows = rows.filter(function (r) { var mk2 = P.lo + kF + r.t + 1; return (!isFinite(fk) || mk2 >= fk) && (!isFinite(tk) || mk2 <= tk); });
       var n = rows.length;
-      if (n < 12) { say2(errBox('Only ' + n + ' months to test. Add stocks with longer history.')); return; }
+      if (!n) { say2(errBox('No months in that range. The test can use ' + lab(24) + ' to ' + lab(T - 1) + '.')); return; }
+      if (n < 12) { say2(errBox('Only ' + n + ' months in that range. Choose a longer range (available: ' + lab(24) + ' to ' + lab(T - 1) + ') or add stocks with longer history.')); return; }
       var S1 = bseries(rows, 1, 'always', sw), SA = bseries(rows, cnt, 'always', sw), SG = bseries(rows, cnt, 'green', sw), SV = VS.use ? bseries(rows, cnt, 'vol', sw) : null;
       var st1 = bstat(S1.r, S1.l), stA = bstat(SA.r, SA.l), stG = bstat(SG.r, SG.l), stV = SV ? bstat(SV.r, SV.l) : null, stL = bstat(SG.l, SG.l);
       var h = '';
+      h += '<p class="note">Dates only choose which months are measured. The strategies and the light for each month are still picked from all earlier months, so nothing looks ahead' + (n < allN ? ' (using ' + n + ' of ' + allN + ' testable months)' : '') + '.</p>';
       h += '<h3>Test: ' + esc(lab(rows[0].t)) + ' to ' + esc(lab(rows[n - 1].t)) + ' (' + n + ' months, ' + num(n / 12, 1) + ' years)</h3>';
       var ed = bedge(SG.r, SG.l, 4000, 11), r12 = broll(SG.r, SG.l, 12), b12 = bboot(SG.r, SG.l, 12, 4000, 12);
       h += '<p class="headline">Split across ' + cnt + ', picks on green and the list on red, grew <b class="' + tone(stG.cagr - stG.lcagr) + '">' + pc(stG.cagr, 1) + '</b> a year, against ' + pc(stG.lcagr, 1) + ' for the plain list. It beat the list in ' + pc(stG.beat, 0) + ' of months and was up in ' + pc(stG.up, 0) + ' of months. Over 12 months it lost money in ' + pc(r12.lose, 0) + ' of past windows and beat the list in ' + pc(r12.win, 0) + '.</p>';
@@ -2459,8 +2469,8 @@ var VOL = {};
         h += tb(['Strategy', 'Filter'], pkN.map(function (j, q) { return '<tr><th class="wrap">' + (q + 1) + '. ' + esc(C.recs[j].name) + '</th><td>' + (C.recs[j].filt ? 'ON' : 'OFF') + '</td></tr>'; }));
         if (ks.length) {
           h += '<p class="note">Combined buy list if the light is green: ' + ks.length + ' stocks (' + (ov.pair >= 0 ? 'strategies share ' + pc(ov.pair, 0) + ' of their stocks' : '') + '). Money share is the part of your total money in each stock.</p>';
-          h += tb(['Stock', 'In how many strategies', 'Money share'], ks.slice(0, 40).map(function (s) { return '<tr><th>' + esc(P.syms[s]) + '</th><td>' + inN[s] + ' of ' + pkN.length + '</td><td>' + pc(share[s], 1) + '</td></tr>'; }));
-          if (ks.length > 40) h += '<p class="note">Showing the 40 largest of ' + ks.length + '.</p>';
+          h += tb(['Stock', 'In how many strategies', 'Money share'], ks.slice(0, 60).map(function (s) { return '<tr><th>' + esc(P.syms[s]) + '</th><td>' + inN[s] + ' of ' + pkN.length + '</td><td>' + pc(share[s], 1) + '</td></tr>'; }));
+          if (ks.length > 60) h += '<p class="note">Showing the 60 largest of ' + ks.length + '.</p>';
         }
         ths.forEach(function (m) { var L = ks.filter(function (q) { return inN[q] >= m; }); h += '<p class="note"><b>Held by at least ' + m + ' of ' + pkN.length + ' strategies (' + L.length + ' stocks):</b> ' + (L.length ? L.slice(0, 20).map(function (q) { return esc(P.syms[q]); }).join(', ') + (L.length > 20 ? ', ...' : '') : 'none') + '</p>'; });
         h += '<p class="note">Do this on the last trading day of the month, after the close. If the light changed colour, switch. Otherwise only rebalance to the new picks.</p>';
