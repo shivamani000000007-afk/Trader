@@ -1578,6 +1578,126 @@ var ROLL_JS = String.raw`
     el('roll-zip').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; if (f) loadZip(f); e.target.value = ''; });
   }
 
+  /* ===== Ingredient gaps: where each ingredient pays, where it fails, and a walk-forward regime switch (uses the monthly rows of all strategies) ===== */
+  var GAP_ING = [['m12', '12m'], ['m6', '6m'], ['m3', '3m'], ['m1', '1m'], ['lv', 'calm'], ['v12', '12m per risk'], ['v6', '6m per risk'], ['v3', '3m per risk']];
+  var GAP_REG = ['Strong up (list +4% or more)', 'Mild up (0 to +4%)', 'Down month, breadth ok', 'Weak breadth (filter holds cash)'];
+  function gapSolve(A, y) {
+    var n = A[0].length, M = [], i, j, k, r;
+    for (i = 0; i < n; i++) { M.push(new Array(n + 1).fill(0)); }
+    for (r = 0; r < A.length; r++) for (i = 0; i < n; i++) { M[i][n] += A[r][i] * y[r]; for (j = 0; j < n; j++) M[i][j] += A[r][i] * A[r][j]; }
+    for (i = 0; i < n; i++) M[i][i] += 1e-9;
+    for (i = 0; i < n; i++) {
+      var p = i;
+      for (k = i + 1; k < n; k++) if (Math.abs(M[k][i]) > Math.abs(M[p][i])) p = k;
+      if (Math.abs(M[p][i]) < 1e-12) return null;
+      var t = M[i]; M[i] = M[p]; M[p] = t;
+      for (k = i + 1; k < n; k++) { var f = M[k][i] / M[i][i]; for (j = i; j <= n; j++) M[k][j] -= f * M[i][j]; }
+    }
+    var x = new Array(n).fill(0);
+    for (i = n - 1; i >= 0; i--) { var s = M[i][n]; for (j = i + 1; j < n; j++) s -= M[i][j] * x[j]; x[i] = s / M[i][i]; }
+    return x;
+  }
+  function gapStat(a) {
+    var v = a.filter(function (x) { return isFinite(x); }), n = v.length;
+    if (n < 3) return { m: NaN, t: NaN, n: n };
+    var m = v.reduce(function (s, x) { return s + x; }, 0) / n, sd = Math.sqrt(v.reduce(function (s, x) { return s + (x - m) * (x - m); }, 0) / (n - 1));
+    return { m: m, t: sd > 0 ? m / (sd / Math.sqrt(n)) : NaN, n: n };
+  }
+  function gapCagr(r) { var g = 1; for (var i = 0; i < r.length; i++) g *= 1 + r[i]; return r.length ? Math.pow(g, 12 / r.length) - 1 : NaN; }
+  function gapHtml(recs, sFrom, b0) {
+    var M = recs.length, T = recs[0].rows.length, q, i, c;
+    if (T < 48) return '<h3>Ingredient gaps</h3><p class="note">Needs at least 48 months of results in the period. Widen the period and run again.</p>';
+    var ret = recs.map(function (r) { return r.rows.map(function (x) { return x.ret; }); }), bench = recs[0].rows.map(function (x) { return x.bench; });
+    var onIdx = [], offIdx = [];
+    recs.forEach(function (r, ii) { (r.filt ? onIdx : offIdx).push(ii); });
+    var cash = [], reg = [];
+    for (q = 0; q < T; q++) {
+      var z = onIdx.length ? onIdx.filter(function (ii) { return ret[ii][q] === 0; }).length / onIdx.length : 0;
+      cash.push(z >= 0.999);
+      reg.push(cash[q] ? 3 : (bench[q] >= 0.04 ? 0 : (bench[q] >= 0 ? 1 : 2)));
+    }
+    var nReg = [0, 0, 0, 0]; reg.forEach(function (x) { nReg[x]++; });
+    /* monthly cross-section: return on ingredient weights (+ filter) */
+    var coefs = [];
+    for (q = 0; q < T; q++) {
+      var pool = cash[q] ? offIdx : recs.map(function (r, ii) { return ii; }), A = [], y = [];
+      pool.forEach(function (ii) { var w = recs[ii].w, row = [1]; GAP_ING.forEach(function (g) { row.push((w[g[0]] || 0) / 100); }); if (!cash[q]) row.push(recs[ii].filt); A.push(row); y.push(ret[ii][q]); });
+      var b = gapSolve(A, y); coefs.push(b ? b.slice(1) : null);
+    }
+    var half = Math.floor(T / 2);
+    function col(j, pred) { var o = []; for (q = 0; q < T; q++) if (coefs[q] && pred(q) && coefs[q][j] !== undefined) o.push(coefs[q][j]); return o; }
+    var rowsHtml = '', cell = function (s) { return isFinite(s.m) ? '<td class="' + (Math.abs(s.t) >= 2 ? (s.m > 0 ? 'good' : 'bad') : '') + '">' + (s.m * 100 >= 0 ? '+' : '') + (s.m * 100).toFixed(2) + ' (' + s.t.toFixed(1) + ')</td>' : '<td>holds cash</td>'; };
+    var verdict = [];
+    for (c = 0; c < 9; c++) {
+      var iname = c < 8 ? GAP_ING[c][1] : 'Filter ON', allS = gapStat(col(c, function () { return true; })), rs = [0, 1, 2, 3].map(function (r) { return gapStat(col(c, function (qq) { return reg[qq] === r; })); });
+      var h1 = gapStat(col(c, function (qq) { return qq < half; })), h2 = gapStat(col(c, function (qq) { return qq >= half; }));
+      var sigPos = rs.some(function (s) { return isFinite(s.t) && s.t >= 2; }), sigNeg = rs.some(function (s) { return isFinite(s.t) && s.t <= -2; }), v;
+      var failR = rs.map(function (s, r) { return isFinite(s.t) && ((allS.m > 0 && s.t <= -2) || (allS.m < 0 && s.t >= 2)) ? GAP_REG[r] : ''; }).filter(Boolean);
+      var okR = rs.map(function (s, r) { return isFinite(s.t) && ((allS.m > 0 && s.t >= 2) || (allS.m < 0 && s.t <= -2)) ? GAP_REG[r] : ''; }).filter(Boolean);
+      if (Math.abs(allS.t) >= 2 && h1.m * h2.m <= 0) v = 'Worked in one half of the period only (' + (h1.m * 100).toFixed(2) + ' then ' + (h2.m * 100).toFixed(2) + ').';
+      else if (Math.abs(allS.t) >= 2) v = (allS.m > 0 ? 'Pays overall' : 'Costs overall') + (failR.length ? ', but goes the wrong way in: ' + failR.join('; ') + '.' : ' and no regime contradicts it.');
+      else if (sigPos && sigNeg) v = 'Flips sign with the market and nets to about zero, so no fixed weight works. It needs a regime-dependent sign (works in: ' + rs.map(function (s, r) { return isFinite(s.t) && s.t >= 2 ? GAP_REG[r] : ''; }).filter(Boolean).join('; ') + ').';
+      else if (sigPos || sigNeg) v = 'Matters in one regime only (' + GAP_REG[rs.findIndex(function (s) { return isFinite(s.t) && Math.abs(s.t) >= 2; })] + '), noise elsewhere.';
+      else v = 'Never significant in any regime. Candidate to remove from the grid.';
+      verdict.push([iname, v]);
+      rowsHtml += '<tr><th class="wrap">' + iname + '</th>' + rs.map(cell).join('') + cell(allS) + '<td>' + (h1.m * 100).toFixed(2) + ' / ' + (h2.m * 100).toFixed(2) + '</td></tr>';
+    }
+    var h = '<h3>Ingredient gaps: where each ingredient does not come, and why</h3>' +
+      '<p class="note">Each month the ' + M + ' strategies are regressed on their ingredient weights. The table shows the extra monthly return (percentage points) from adding +100 of an ingredient, with the t-statistic in brackets (green or red when beyond 2). Regimes use the list return that month; the last one is months when the downtrend filter held cash (breadth too low). Months: ' + nReg.map(function (n, r) { return GAP_REG[r] + ' ' + n; }).join(', ') + '.</p>' +
+      '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Ingredient</th>' + GAP_REG.map(function (g) { return '<th class="wrap">' + g + '</th>'; }).join('') + '<th>All months</th><th class="wrap">First half / second half</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>' +
+      '<ul>' + verdict.map(function (v) { return '<li><b>' + v[0] + ':</b> ' + v[1] + '</li>'; }).join('') + '</ul>';
+    /* where the best fixed strategy goes missing: months it trails the median strategy, and which ingredient the month's top 5 had that it lacked */
+    var cg = recs.map(function (r, ii) { return gapCagr(ret[ii]); }), refI = 0;
+    cg.forEach(function (x, ii) { if (x > cg[refI]) refI = ii; });
+    var miss = GAP_ING.map(function () { return [0, 0, 0, 0]; }), nBad = [0, 0, 0, 0], nMonthsBad = 0;
+    for (q = 0; q < T; q++) {
+      var pool2 = cash[q] ? offIdx : recs.map(function (r, ii) { return ii; }), srt = pool2.slice().sort(function (a, b) { return ret[b][q] - ret[a][q]; }), med = ret[srt[Math.floor(srt.length / 2)]][q];
+      if (ret[refI][q] >= med) continue;
+      var top5 = srt.slice(0, 5); nMonthsBad++; nBad[reg[q]]++;
+      GAP_ING.forEach(function (g, gi) {
+        var net = top5.reduce(function (s, ii) { return s + Math.sign(recs[ii].w[g[0]] || 0); }, 0) / 5, rw = Math.sign(recs[refI].w[g[0]] || 0);
+        if (Math.abs(net) >= 0.4 && net * rw <= 0) miss[gi][reg[q]]++;
+      });
+    }
+    var ref = recs[refI];
+    h += '<h3>Where the best fixed strategy misses</h3><p class="note">Best growth over the whole period: <b>' + esc(ref.name) + ' (filter ' + (ref.filt ? 'ON' : 'OFF') + ')</b>, ' + (cg[refI] * 100).toFixed(1) + '% a year against ' + (gapCagr(bench) * 100).toFixed(1) + '% for the list. It trailed the median strategy in ' + nMonthsBad + ' of ' + T + ' months. The table counts those months in which most of that month\'s top 5 used an ingredient with the opposite sign, or one this strategy lacks.</p>' +
+      '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Ingredient missing</th>' + GAP_REG.map(function (g, r) { return '<th class="wrap">' + g + ' (' + nBad[r] + ' bad months)</th>'; }).join('') + '</tr></thead><tbody>' +
+      GAP_ING.map(function (g, gi) { return '<tr><th class="wrap">' + g[1] + '</th>' + miss[gi].map(function (n) { return '<td>' + n + '</td>'; }).join('') + '</tr>'; }).join('') + '</tbody></table></div>';
+    /* walk-forward regime switch */
+    var tr3 = function (qq) { if (qq < 3) return -1; return (1 + bench[qq - 1]) * (1 + bench[qq - 2]) * (1 + bench[qq - 3]) - 1; };
+    var rg2 = [], sum = {}, cnt = {}, sumAll = new Array(M).fill(0), cntAll = 0, sw = [], fx = [], bm = [], warm = Math.min(36, Math.floor(T / 3)), picks = {};
+    for (q = 0; q < T; q++) rg2.push((cash[q] ? 2 : 0) + (tr3(q) >= 0 ? 1 : 0));
+    for (q = 0; q < T; q++) {
+      if (q >= warm) {
+        var r2 = rg2[q], useReg = cnt[r2] >= 6, best = -1, bv = -Infinity, bf = -1, bfv = -Infinity;
+        for (i = 0; i < M; i++) {
+          var v1 = useReg ? sum[r2][i] / cnt[r2] : sumAll[i] / cntAll, v2 = sumAll[i] / cntAll;
+          if (v1 > bv) { bv = v1; best = i; } if (v2 > bfv) { bfv = v2; bf = i; }
+        }
+        sw.push(ret[best][q]); fx.push(ret[bf][q]); bm.push(bench[q]); picks[best] = 1;
+      }
+      var rr = rg2[q]; if (!sum[rr]) { sum[rr] = new Array(M).fill(0); cnt[rr] = 0; }
+      for (i = 0; i < M; i++) { sum[rr][i] += ret[i][q]; sumAll[i] += ret[i][q]; } cnt[rr]++; cntAll++;
+    }
+    var cs = gapCagr(sw), cf = gapCagr(fx), cb = gapCagr(bm), rankOf = function (v) { var n = 1; for (i = 0; i < M; i++) if (gapCagr(ret[i].slice(warm)) > v) n++; return n; };
+    h += '<h3>Can a regime switch be #1? Walk-forward test</h3><p class="note">Each month the strategy with the best past average in the same regime is used (regime = filter in cash or not, and whether the list rose over the previous 3 months). Only earlier months are used; the first ' + warm + ' months are warm-up, so results cover ' + sw.length + ' months.</p>' +
+      '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Approach</th><th>Growth a year</th><th>Rank among ' + M + ' fixed strategies</th></tr></thead><tbody>' +
+      '<tr><th class="wrap">The list</th><td>' + (cb * 100).toFixed(1) + '%</td><td>n/a</td></tr>' +
+      '<tr><th class="wrap">Best strategy so far, no regime</th><td>' + (cf * 100).toFixed(1) + '%</td><td>' + rankOf(cf) + '</td></tr>' +
+      '<tr><th class="wrap">Regime switch (' + Object.keys(picks).length + ' different strategies used)</th><td class="' + (cs > cb ? 'good' : 'bad') + '">' + (cs * 100).toFixed(1) + '%</td><td>' + rankOf(cs) + '</td></tr>' +
+      '<tr><th class="wrap">Best fixed strategy (picked with hindsight)</th><td>' + (gapCagr(ret[refI].slice(warm)) * 100).toFixed(1) + '%</td><td>' + rankOf(gapCagr(ret[refI].slice(warm))) + '</td></tr></tbody></table></div>';
+    var want = [0, 1, 2, 3].map(function (r2b) {
+      var best = -1, bv = -Infinity, n = 0, lm = 0;
+      if (!sum[r2b]) return '';
+      for (i = 0; i < M; i++) { var v = sum[r2b][i] / cnt[r2b]; if (v > bv) { bv = v; best = i; } }
+      for (q = 0; q < T; q++) if (rg2[q] === r2b) { lm += bench[q]; n++; }
+      return '<tr class="pick" tabindex="0" data-fw="' + fw(recs[best]) + '"><th class="wrap">' + ['List fell over the last 3 months, filter active', 'List rose over the last 3 months, filter active', 'List fell over the last 3 months, filter in cash', 'List rose over the last 3 months, filter in cash'][r2b] + ' (' + n + ' months)</th><td class="wrap">' + nm(recs[best]) + '</td><td>' + (bv * 100).toFixed(1) + '% (list ' + (lm / n * 100).toFixed(1) + '%)</td></tr>';
+    });
+    h += '<p class="note"><b>What each regime wants</b> (best average monthly return over the whole period; tap a row to load it):</p><div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Regime known at month start</th><th class="wrap">Strategy</th><th>Average a month</th></tr></thead><tbody>' + want.join('') + '</tbody></table></div>' +
+      '<p class="note">Based on one-month fresh starts; the picks are chosen in-sample here, so trust the walk-forward row above, not this table, as the test.</p>';
+    return h;
+  }
+
   async function run() {
     if (busy) return;
     var P, S;
@@ -1647,7 +1767,7 @@ var ROLL_JS = String.raw`
       }
       LAST = { res: res, lens: lens, recs: recs, N: N, sFrom: sFrom, sTo: sTo, source: UNI ? UNI.name + ' (' + P.syms.length + ' stocks)' : 'Loaded list (' + P.syms.length + ' stocks)' };
       el('roll-dl').hidden = false;
-      try { setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor)); }
+      try { var gapH = ''; try { gapH = gapHtml(recs, sFrom, b0); } catch (eg) { gapH = '<p class="note">Ingredient gap analysis could not run: ' + esc(eg.message) + '</p>'; } setOut(render(res, lens, skipped, recs, N, sFrom, sTo, bEnd, topK, anchor) + gapH); }
       catch (e2) { setOut('<p class="headline">Finished. ' + recs.length + ' strategies were scored in every window.</p><p class="note">The list is too big to show here. Use Download all 432 strategies (CSV) above. (' + esc(e2.message) + ')</p>'); }
     } catch (e) {
       setOut(errBox('Something went wrong: ' + e.message));
