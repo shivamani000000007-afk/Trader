@@ -1615,7 +1615,7 @@ var ROLL_JS = String.raw`
     recs.forEach(function (r, ii) { (r.filt ? onIdx : offIdx).push(ii); });
     var cash = [], reg = [];
     for (q = 0; q < T; q++) {
-      var z = onIdx.length ? onIdx.filter(function (ii) { return ret[ii][q] === 0; }).length / onIdx.length : 0;
+      var z = onIdx.length ? onIdx.filter(function (ii) { var rw = recs[ii].rows[q]; return rw.pk ? rw.pk.length === 0 : ret[ii][q] === 0; }).length / onIdx.length : 0;
       cash.push(z >= 0.999);
       reg.push(cash[q] ? 3 : (bench[q] >= 0.04 ? 0 : (bench[q] >= 0 ? 1 : 2)));
     }
@@ -1889,6 +1889,18 @@ var ROLL_JS = String.raw`
   }
   /* ===== Month advisor: top 25-30 strategies for ANY month, with their stocks overlapped (stop-loss and exit rank applied) ===== */
   var ADVC = null, advBusy = false;
+  function advRegimes(recs, withOpen) {
+    var T = recs[0].rows.length, on = [], x, cash = [], rg = [], bench = recs[0].rows.map(function (z) { return z.bench; });
+    recs.forEach(function (r, ii) { if (r.filt) on.push(ii); });
+    var tot = T + (withOpen && recs[0].open ? 1 : 0);
+    for (x = 0; x < tot; x++) {
+      var z = 0; on.forEach(function (ii) { var rw = x < T ? recs[ii].rows[x] : recs[ii].open; if (rw && rw.pk && rw.pk.length === 0) z++; });
+      cash.push(on.length > 0 && z / on.length >= 0.999);
+      var t3 = x < 3 ? -1 : (1 + bench[x - 1]) * (1 + bench[x - 2]) * (1 + bench[x - 3]) - 1;
+      rg.push((cash[x] ? 2 : 0) + (t3 >= 0 ? 1 : 0));
+    }
+    return { cash: cash, rg: rg, bench: bench };
+  }
   function advOut(h) { var o = el('adv-out'); if (o) o.innerHTML = h; }
   function advPool() {
     if (UNI) return { P: UNI.P, S: UNI.S };
@@ -1941,8 +1953,14 @@ var ROLL_JS = String.raw`
       if (kDec > P.kSig) { advOut(errBox('Prices end at ' + lbl(P.lo + P.kSig) + '. The latest month you can hold is ' + lbl(P.lo + P.kSig + 1) + '.')); return; }
       var at = function (r, k) { var x = k - k0; return x >= 0 && x < r.rows.length ? r.rows[x] : (k === P.kSig && r.open && k - k0 === r.rows.length ? r.open : null); };
       var prior = function (r) { var g = 1, j; for (j = kDec - 12; j < kDec; j++) { var x = at(r, j); g *= 1 + (x ? x.ret : 0); } return g - 1; };
-      var useMonth = basis === 'month' && !isOpen;
-      var sc = recs.map(function (r, i) { var x = at(r, kDec); return { i: i, r: r, x: x, s: useMonth ? (x ? x.ret : -9) : prior(r), p: prior(r), cashM: !!(x && x.pk && !x.pk.length) }; }).filter(function (z) { return z.x; });
+      var useMonth = basis === 'month' && !isOpen, useReg = basis === 'regime', idxs = [], regName = '';
+      if (useReg) {
+        var RGI = advRegimes(recs, true), xDec = kDec - k0, r2 = RGI.rg[xDec], j2, same = [], all = [];
+        for (j2 = 0; j2 < xDec; j2++) { all.push(j2); if (RGI.rg[j2] === r2) same.push(j2); }
+        idxs = same.length >= 6 ? same : all; regName = (RGI.cash[xDec] ? 'filter in cash' : 'filter active') + ', list ' + (r2 % 2 ? 'rose' : 'fell') + ' over the previous 3 months' + (same.length >= 6 ? ' (' + same.length + ' similar months)' : ' (too few similar months, all months used)');
+      }
+      var meanSame = function (r) { var t = 0; idxs.forEach(function (j) { var q = r.rows[j]; t += q ? q.ret : 0; }); return idxs.length ? t / idxs.length : 0; };
+      var sc = recs.map(function (r, i) { var x = at(r, kDec); return { i: i, r: r, x: x, s: useReg ? meanSame(r) : (useMonth ? (x ? x.ret : -9) : prior(r)), p: useReg ? meanSame(r) : prior(r), cashM: !!(x && x.pk && !x.pk.length) }; }).filter(function (z) { return z.x; });
       sc.sort(function (a, b) { return (b.s - a.s) || ((a.cashM ? 1 : 0) - (b.cashM ? 1 : 0)) || (b.p - a.p); });
       var top = sc.slice(0, M), cur = advCombine(top, function (z) { return z.x.pk; });
       var pv = advCombine(top, function (z) { var x = at(z.r, kDec - 1); return x ? x.pk : []; });
@@ -1954,7 +1972,7 @@ var ROLL_JS = String.raw`
       var comb = 0, nComb = 0; if (!isOpen) top.forEach(function (z) { comb += z.x.ret; nComb++; });
       var bm = isOpen ? NaN : benchAt(P, kDec, 1).m, hl = lbl(hold);
       var h = '<p class="headline">' + (isOpen ? 'Open month ' + hl + ': ' : 'Hold month <b>' + hl + '</b> (decided at the close of ' + lbl(P.lo + kDec) + '): ') + 'top <b>' + top.length + '</b> strategies, ' + names.length + ' different stocks. Stop-loss ' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ', exit rank ' + (A.ex || 'off') + ', ' + N + ' stocks each.</p>';
-      h += '<p class="note">Strategies ranked by ' + (useMonth ? 'their actual result in ' + hl + ' (a backtest, found with hindsight)' : 'their growth over the 12 months before ' + hl + ' (known at the time, no hindsight)') + (basis === 'month' && isOpen ? '. ' + hl + ' has no result yet, so the 12-month ranking is used' : '') + '.' + (!isOpen ? ' Average of these strategies in the month: <b class="' + tone(comb / nComb) + '">' + pc(comb / nComb, 1, true) + '</b> against the list <b>' + pc(bm, 1, true) + '</b>.' : '') + '</p>';
+      h += '<p class="note">Strategies ranked by ' + (useReg ? 'their average result in months like this one (' + regName + '), using earlier months only' : useMonth ? 'their actual result in ' + hl + ' (a backtest, found with hindsight)' : 'their growth over the 12 months before ' + hl + ' (known at the time, no hindsight)') + (basis === 'month' && isOpen ? '. ' + hl + ' has no result yet, so the 12-month ranking is used' : '') + '.' + (!isOpen ? ' Average of these strategies in the month: <b class="' + tone(comb / nComb) + '">' + pc(comb / nComb, 1, true) + '</b> against the list <b>' + pc(bm, 1, true) + '</b>.' : '') + '</p>';
       h += '<h3>Green: stocks to hold (overlap of the ' + top.length + ' strategies)</h3><p class="note">Split = share of the money if you give every strategy an equal slice and each strategy spreads its slice equally over its stocks. Held by = how many strategies hold the stock. NEW = not held last month by these strategies.</p>';
       h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Stock</th><th>Held by</th><th>Split</th><th>Status</th>' + (isOpen ? '' : '<th>Result in month</th>') + '</tr></thead><tbody>' + names.map(function (s) {
         var rr = real(s), c = cur.cnt[s], strong = c >= Math.ceil(top.length / 2);
@@ -1964,7 +1982,7 @@ var ROLL_JS = String.raw`
       var stopNames = Object.keys(stops).sort(function (a, b) { return stops[b] - stops[a]; });
       if (!sells.length && !stopNames.length) h += '<p class="note">Nothing to sell: every stock these strategies held last month is still held.</p>';
       else h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Stock</th><th>Why</th><th>Held last month by</th>' + (isOpen ? '' : '<th>Result in month</th>') + '</tr></thead><tbody>' + sells.map(function (s) { var rr = real(s); return '<tr><th class="wrap"><span class="bad">' + esc(s) + '</span></th><td>SELL: dropped out of the top ' + A.N + ' or below the exit rank</td><td>' + pv.cnt[s] + ' of ' + top.length + '</td>' + (isOpen ? '' : '<td class="' + tone(rr) + '">' + (isFinite(rr) ? pc(rr, 1, true) : 'n/a') + '</td>') + '</tr>'; }).join('') + stopNames.map(function (s) { var rr = real(s); return '<tr><th class="wrap"><span class="bad">' + esc(s) + '</span></th><td>STOPPED OUT in ' + stops[s] + ' strateg' + (stops[s] === 1 ? 'y' : 'ies') + ' (fell ' + PK_OPT.sl + '% below entry)</td><td>' + (cur.cnt[s] || 0) + ' of ' + top.length + ' now</td><td class="' + tone(rr) + '">' + (isFinite(rr) ? pc(rr, 1, true) : 'n/a') + '</td></tr>'; }).join('') + '</tbody></table></div>';
-      h += '<h3>The ' + top.length + ' strategies</h3><div class="scroll"><table class="tbl"><thead><tr><th>Rank</th><th class="wrap">Strategy</th><th>' + (useMonth ? 'Result in month' : 'Prior 12 months') + '</th><th class="wrap">Stocks held</th></tr></thead><tbody>' + top.map(function (z, i) {
+      h += '<h3>The ' + top.length + ' strategies</h3><div class="scroll"><table class="tbl"><thead><tr><th>Rank</th><th class="wrap">Strategy</th><th>' + (useReg ? 'Avg in similar months' : (useMonth ? 'Result in month' : 'Prior 12 months')) + '</th><th class="wrap">Stocks held</th></tr></thead><tbody>' + top.map(function (z, i) {
         var v = useMonth ? z.x.ret : z.p;
         return '<tr class="pick" tabindex="0" data-fw="' + fw(z.r) + '"><td>#' + (i + 1) + '</td><th class="wrap">' + nm(z.r) + '</th><td class="' + tone(v) + '">' + pc(v, 1, true) + '</td><td class="wrap">' + (z.x.pk.length ? esc(z.x.pk.slice(0, 12).join(', ')) + (z.x.pk.length > 12 ? ' +' + (z.x.pk.length - 12) + ' more' : '') : 'cash') + '</td></tr>';
       }).join('') + '</tbody></table></div>';
@@ -1984,7 +2002,7 @@ var ROLL_JS = String.raw`
       '<div class="field"><div class="lab"><label for="adv-month">Hold month</label></div><input id="adv-month" type="date" value="2020-01-01"></div>' +
       '<div class="field"><div class="lab"><label for="adv-m">Strategies to combine (1 to 30)</label></div><input id="adv-m" type="number" min="1" max="30" step="1" value="25"></div>' +
       '<div class="field"><div class="lab"><label for="adv-n">Stocks per strategy (1 to 30)</label></div><input id="adv-n" type="number" min="1" max="30" step="1" value="25"></div>' +
-      '<div class="field"><div class="lab"><label for="adv-basis">Rank strategies by</label></div><select id="adv-basis"><option value="prior">Prior 12 months (known at the time)</option><option value="month">Result in that month (backtest, hindsight)</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="adv-basis">Rank strategies by</label></div><select id="adv-basis"><option value="regime">Same market type, earlier months (known at the time)</option><option value="prior">Prior 12 months (known at the time)</option><option value="month">Result in that month (backtest, hindsight)</option></select></div>' +
       '</div><div class="row"><button type="button" class="btn" id="adv-run">Show stocks to hold</button></div><div id="adv-out" class="out"></div>';
     var rc = el('roll-card');
     if (rc && rc.nextSibling) tab.insertBefore(c, rc.nextSibling); else tab.insertBefore(c, out);
@@ -1992,8 +2010,85 @@ var ROLL_JS = String.raw`
     el('adv-run').addEventListener('click', advRun);
   }
 
+  /* ===== Test plan: advisor versus the list, month by month (the findings of the 432-strategy study live here) ===== */
+  var tpBusy = false;
+  function tpOut(h) { var o = el('tp-out'); if (o) o.innerHTML = h; }
+  async function testRun() {
+    if (tpBusy) return;
+    var pool = advPool();
+    if (!pool) { tpOut(errBox('Load your stocks and wait for the picks table to appear, or upload a stocks ZIP in the finder above, then tap again.')); return; }
+    var P = pool.P, S = pool.S, a = ym('tp-from'), b = ym('tp-to'), M = Math.max(1, Math.min(30, Math.round(+el('tp-m').value || 25))), N = Math.max(1, Math.min(30, Math.round(+el('tp-n').value || 25))), cost = val('pk-cost', 0.25, 0, 5);
+    if (!isFinite(a) || !isFinite(b) || b < a) { tpOut(errBox('Set the first month on or before the last month.')); return; }
+    tpBusy = true;
+    try {
+      var A = await advSims(P, S, N, cost), recs = A.recs, R = recs.length, i, x;
+      var k0 = recs[0].rows[0].k, T = recs[0].rows.length, ret = recs.map(function (r) { return r.rows.map(function (z) { return z.ret; }); }), bench = recs[0].rows.map(function (z) { return z.bench; });
+      var L = ret.map(function (r) { var o = [0]; for (var j = 0; j < r.length; j++) o.push(o[j] + Math.log(Math.max(1e-6, 1 + r[j]))); return o; });
+      var on = [], off = []; recs.forEach(function (r, ii) { (r.filt ? on : off).push(ii); });
+      var RG = advRegimes(recs, false), cash = RG.cash, rg2 = RG.rg;
+      var sum = {}, cnt = {}, sumAll = new Array(R).fill(0), nAll = 0, rows = [], warm = 36, k, first = true;
+      var sa = 1, sl = 1, ss = 1, sf = 1, sh = 1, sg = 1, n = 0, beat = 0, beatS = 0, beatG = 0, rkSum = 0;
+      for (x = 0; x < T; x++) {
+        var hold = P.lo + k0 + x + 1;
+        if (x >= warm && x >= 12 && hold >= a && hold <= b) {
+          var pr = recs.map(function (r, ii) { return { ii: ii, p: Math.exp(L[ii][x] - L[ii][x - 12]) - 1 }; });
+          pr.sort(function (u, v) { return v.p - u.p; });
+          var top = pr.slice(0, M), adv = top.reduce(function (s2, z) { return s2 + ret[z.ii][x]; }, 0) / top.length;
+          var r2 = rg2[x], useReg = cnt[r2] >= 6, best = -1, bv = -Infinity, bf = -1, bfv = -Infinity;
+          for (i = 0; i < R; i++) { var v1 = useReg ? sum[r2][i] / cnt[r2] : sumAll[i] / nAll, v2 = sumAll[i] / nAll; if (v1 > bv) { bv = v1; best = i; } if (v2 > bfv) { bfv = v2; bf = i; } }
+          var vr = recs.map(function (r, ii) { return { ii: ii, v: useReg ? sum[r2][ii] / cnt[r2] : sumAll[ii] / nAll }; }).sort(function (u, v) { return v.v - u.v; }).slice(0, M), advG = vr.reduce(function (s3, z) { return s3 + ret[z.ii][x]; }, 0) / vr.length;
+          var hs = -Infinity, rank = 1; for (i = 0; i < R; i++) { if (ret[i][x] > hs) hs = ret[i][x]; if (ret[i][x] > adv) rank++; }
+          var rl = cash[x] ? 'Weak breadth' : (bench[x] >= 0.04 ? 'Strong up' : (bench[x] >= 0 ? 'Mild up' : 'Down'));
+          rows.push({ label: lbl(hold), rl: rl, adv: adv, advG: advG, bench: bench[x], sw: ret[best][x], swn: nm(recs[best]), hs: hs, rank: rank });
+          sa *= 1 + adv; sg *= 1 + advG; if (advG > bench[x]) beatG++; sl *= 1 + bench[x]; ss *= 1 + ret[best][x]; sf *= 1 + ret[bf][x]; sh *= 1 + hs; n++; if (adv > bench[x]) beat++; if (ret[best][x] > bench[x]) beatS++; rkSum += rank;
+        }
+        var rr = rg2[x]; if (!sum[rr]) { sum[rr] = new Array(R).fill(0); cnt[rr] = 0; }
+        for (i = 0; i < R; i++) { sum[rr][i] += ret[i][x]; sumAll[i] += ret[i][x]; } cnt[rr]++; nAll++;
+      }
+      if (n < 3) { tpOut(errBox('Fewer than 3 testable months in that range. The first month with enough history is ' + lbl(P.lo + k0 + 1 + 36) + ' and the last is ' + lbl(P.lo + k0 + T) + '. Widen the range inside those.')); return; }
+      var an = function (g) { return Math.pow(g, 12 / n) - 1; };
+      var byR = {}; rows.forEach(function (r) { var o = byR[r.rl] || (byR[r.rl] = { n: 0, adv: 0, g: 0, b: 0, w: 0, wg: 0 }); o.n++; o.adv += r.adv; o.g += r.advG; o.b += r.bench; if (r.adv > r.bench) o.w++; if (r.advG > r.bench) o.wg++; });
+      var h = '<p class="headline">' + n + ' months, ' + rows[0].label + ' to ' + rows[n - 1].label + ': Advisor A (top ' + M + ' strategies by prior 12 months, ' + N + ' stocks each) grew <b class="' + tone(an(sa) - an(sl)) + '">' + pc(an(sa), 1, true) + '</b> a year against <b>' + pc(an(sl), 1, true) + '</b> for the list (' + beat + ' of ' + n + ' months ahead). Advisor B, which picks strategies by how they did in the same market type, grew <b class="' + tone(an(sg) - an(sl)) + '">' + pc(an(sg), 1, true) + '</b> (' + beatG + ' of ' + n + ' months ahead).</p>';
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Way to choose</th><th>Growth a year</th><th>Beat the list in</th></tr></thead><tbody>' +
+        '<tr><th class="wrap">The list</th><td>' + pc(an(sl), 1, true) + '</td><td>n/a</td></tr>' +
+        '<tr><th class="wrap"><b>Advisor B: top ' + M + ' by past average in the same market type, stocks merged</b></th><td class="' + tone(an(sg)) + '">' + pc(an(sg), 1, true) + '</td><td>' + beatG + ' of ' + n + ' months</td></tr>' +
+        '<tr><th class="wrap">Advisor A: top ' + M + ' by prior 12 months, stocks merged</th><td class="' + tone(an(sa)) + '">' + pc(an(sa), 1, true) + '</td><td>' + beat + ' of ' + n + ' months</td></tr>' +
+        '<tr><th class="wrap">One strategy, switched by market regime (earlier months only)</th><td class="' + tone(an(ss)) + '">' + pc(an(ss), 1, true) + '</td><td>' + beatS + ' of ' + n + ' months</td></tr>' +
+        '<tr><th class="wrap">One strategy: the best so far, no regime</th><td class="' + tone(an(sf)) + '">' + pc(an(sf), 1, true) + '</td><td></td></tr>' +
+        '<tr><th class="wrap">Hindsight: the best of 432 each month (cannot be bought)</th><td>' + pc(an(sh), 1, true) + '</td><td></td></tr></tbody></table></div>';
+      h += '<p class="note">Average rank of Advisor A among the ' + R + ' strategies each month: <b>' + (rkSum / n).toFixed(0) + '</b> (1 is best). By market type (the label uses the month’s own result, so it explains rather than predicts):</p>';
+      h += '<div class="scroll"><table class="tbl"><thead><tr><th class="wrap">Market</th><th>Months</th><th>Advisor A avg a month</th><th>Advisor B avg a month</th><th>List avg a month</th><th>A / B beat the list</th></tr></thead><tbody>' + ['Strong up', 'Mild up', 'Down', 'Weak breadth'].map(function (k2) { var o = byR[k2]; return o ? '<tr><th class="wrap">' + k2 + '</th><td>' + o.n + '</td><td class="' + tone(o.adv / o.n) + '">' + pc(o.adv / o.n, 1, true) + '</td><td class="' + tone(o.g / o.n) + '">' + pc(o.g / o.n, 1, true) + '</td><td>' + pc(o.b / o.n, 1, true) + '</td><td>' + o.w + ' / ' + o.wg + ' of ' + o.n + '</td></tr>' : ''; }).join('') + '</tbody></table></div>';
+      h += '<h3>Month by month</h3><div class="scroll"><table class="tbl"><thead><tr><th>Hold month</th><th>Market</th><th>Advisor A</th><th>Advisor B</th><th>List</th><th class="wrap">Regime-switch strategy</th><th>Best of 432</th><th>Advisor rank</th></tr></thead><tbody>' + rows.map(function (r) {
+        return '<tr><th>' + r.label + '</th><td>' + r.rl + '</td><td class="' + (r.adv > r.bench ? 'good' : 'bad') + '">' + pc(r.adv, 1, true) + '</td><td class="' + (r.advG > r.bench ? 'good' : 'bad') + '">' + pc(r.advG, 1, true) + '</td><td>' + pc(r.bench, 1, true) + '</td><td class="wrap ' + tone(r.sw) + '">' + pc(r.sw, 1, true) + ' <span class="muted">' + esc(r.swn) + '</span></td><td>' + pc(r.hs, 1, true) + '</td><td>' + r.rank + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+      h += '<p class="note">All strategies are run with your stop-loss (' + (PK_OPT.sl > 0 ? PK_OPT.sl + '%' : 'off') + ') and exit rank (' + (A.ex || 'off') + '), costs included. The advisor and the regime-switch strategy use only months before the one they are tested on. Stocks come from today’s survivors, so old months look better than they were.</p>';
+      tpOut(h);
+    } catch (e) { tpOut(errBox('Something went wrong: ' + e.message)); }
+    finally { tpBusy = false; }
+  }
+  function mountTest() {
+    var tab = el('tab-pk'), out = el('out-pk');
+    if (!tab || !out || el('tp-card')) return;
+    var c = document.createElement('div');
+    c.className = 'card'; c.id = 'tp-card';
+    c.innerHTML = '<h2>Test plan: does the advisor beat the list, month by month?</h2>' +
+      '<p class="note"><b>What the 432-strategy study found (Jan 2010 to Sep 2026).</b> No strategy owns #1: the monthly winner is a different one nearly every month, and the best of an earlier period does not stay best. 12m and 12m per risk pay overall but fail in weak-breadth rebound months. Calm helps in down months and hurts in strong-up months, so its sign must change with the market. 6m only pays in strong-up months. 3m, 1m and 3m per risk never mattered. The downtrend filter helped until 2017 and since then mostly sat out rebounds. What worked was choosing the strategy by market type using earlier months only. Simply merging the stocks of the top strategies of the prior 12 months did not beat the list in my test, so check Advisor A and B below on your own list before trusting either. The Ingredient gaps tables in the finder above show these numbers for your list.</p>' +
+      '<p class="note"><b>How to use it.</b> 1) Run the test below over a range you did not tune on. 2) Trust an advisor only if it beats the list in most months and in more than one market type. 3) Then use the Month advisor above for the month you want to hold. Stop-loss and exit rank come from the fields at the top.</p>' +
+      '<div class="fields">' +
+      '<div class="field"><div class="lab"><label for="tp-from">First hold month</label></div><input id="tp-from" type="date" value="2020-01-01"></div>' +
+      '<div class="field"><div class="lab"><label for="tp-to">Last hold month</label></div><input id="tp-to" type="date" value="2026-09-01"></div>' +
+      '<div class="field"><div class="lab"><label for="tp-m">Strategies to combine (1 to 30)</label></div><input id="tp-m" type="number" min="1" max="30" step="1" value="25"></div>' +
+      '<div class="field"><div class="lab"><label for="tp-n">Stocks per strategy (1 to 30)</label></div><input id="tp-n" type="number" min="1" max="30" step="1" value="25"></div>' +
+      '</div><div class="row"><button type="button" class="btn" id="tp-run">Run the test plan</button></div><div id="tp-out" class="out"></div>';
+    var ac = el('adv-card');
+    if (ac && ac.nextSibling) tab.insertBefore(c, ac.nextSibling); else tab.insertBefore(c, out);
+    ['input', 'change'].forEach(function (t) { c.addEventListener(t, function (e) { e.stopPropagation(); }); });
+    el('tp-run').addEventListener('click', testRun);
+  }
+
   mount();
   mountAdv();
+  mountTest();
 })();
 `;
 
