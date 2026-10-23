@@ -2910,8 +2910,219 @@ var VOL = {};
     el('sp-run').addEventListener('click', runPlus);
   }
 
+  /* ================= Month-end tab: strategy, chances and stock list for a date you give ================= */
+  var MEBUSY = false, ME_LAST = null;
+  var ME_RULES = [['ov', 'Overlap rule (stocks shared by enough strategies)'], ['sticky', 'Overlap, keep a stock while it is still fairly shared'], ['tilt', 'Tilt: money share grows with overlap squared'], ['split', 'Plain split across the strategies']];
+  function meMonthKey(s) { var m = /^(\d{4})-(\d{2})/.exec(s || ''); return m ? (+m[1]) * 12 + (+m[2]) - 1 : NaN; }
+  function meCount(sets) {
+    var co = {}, pos = {};
+    sets.forEach(function (st) { st.forEach(function (q, p) { co[q] = (co[q] || 0) + 1; pos[q] = (pos[q] || 0) + p; }); });
+    Object.keys(co).forEach(function (q) { pos[q] /= co[q]; });
+    return { co: co, rk: pos };
+  }
+  /* money share per stock for one rule. info = {co, rk, sets}; prev = last month's weights (only used by 'sticky') */
+  function meW(rule, info, m, minN, prev) {
+    var co = info.co, rk = info.rk, cand = Object.keys(co).map(Number), w = {}, sel = [], tot = 0, i;
+    if (!cand.length) return w;
+    if (rule === 'split') {
+      info.sets.forEach(function (st) { st.forEach(function (q) { w[q] = (w[q] || 0) + 1 / Math.max(1, st.length); }); });
+    } else if (rule === 'tilt') {
+      cand.forEach(function (q) { w[q] = co[q] * co[q]; });
+    } else {
+      cand.sort(function (a, b) { return co[b] - co[a] || rk[a] - rk[b] || a - b; });
+      var keep = Math.max(2, m - 3);
+      sel = cand.filter(function (q) { return co[q] >= m || (rule === 'sticky' && prev && prev[q] && co[q] >= keep); });
+      for (i = 0; sel.length < minN && i < cand.length; i++) if (sel.indexOf(cand[i]) < 0) sel.push(cand[i]);
+      sel.forEach(function (q) { w[q] = 1; });
+    }
+    Object.keys(w).forEach(function (q) { tot += w[q]; });
+    Object.keys(w).forEach(function (q) { w[q] /= tot; });
+    return w;
+  }
+  function meRet(P, w, k, fb) {
+    var s = 0, ws = 0;
+    Object.keys(w).forEach(function (q) { var f = fwd(P, +q, k, 1); if (isFinite(f)) { s += w[q] * f; ws += w[q]; } });
+    return ws > 0 ? s / ws : fb;
+  }
+  function meTurn(w, pw) {
+    var t = 0;
+    Object.keys(w).forEach(function (q) { t += Math.abs(w[q] - (pw[q] || 0)); });
+    Object.keys(pw).forEach(function (q) { if (w[q] === undefined) t += pw[q]; });
+    return t;
+  }
+  /* a = always follow the rule, g = follow the rule on green and hold the list on red */
+  function meSeries(C, P, kF, infos, rule, m, minN, sw) {
+    var a = [], g = [], l = [], pw = {}, prevOn = null, ns = 0, i;
+    for (i = 0; i < infos.length; i++) {
+      var x = infos[i], w = meW(rule, x, m, minN, pw), ret = meRet(P, w, kF + x.t, x.l);
+      ret -= C.cost / 100 * 0.5 * meTurn(w, pw);
+      ns += Object.keys(w).length; pw = w;
+      var gx = x.on ? ret : x.l;
+      if (prevOn !== null && x.on !== prevOn) gx -= sw / 100;
+      prevOn = x.on; a.push(ret); g.push(gx); l.push(x.l);
+    }
+    return { a: a, g: g, l: l, lastW: pw, avgN: infos.length ? ns / infos.length : 0 };
+  }
+  function meSave(text, name) {
+    var u = URL.createObjectURL(new Blob([text], { type: 'text/csv' })), a = document.createElement('a');
+    a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(u); }, 4000);
+  }
+  async function runMe() {
+    if (MEBUSY) return;
+    MEBUSY = true;
+    var o = el('me-out'), say2 = function (h) { o.innerHTML = h; };
+    try {
+      say2('<p class="note">Preparing...</p>');
+      var C = await build(say2);
+      if (C.err) { say2(errBox(C.err)); return; }
+      var P = C.P, T = C.T, M = C.M, lg = C.lg, kF = C.kFirst;
+      var cnt = Math.min(M, Math.max(2, Math.round(val('me-n', 15, 2, 40))));
+      var m = Math.min(cnt, Math.max(2, Math.round(val('me-m', 9, 2, 40))));
+      var minN = Math.round(val('me-min', 10, 1, 60)), win = Math.round(val('me-win', 60, 12, 240)), sw = val('me-sw', 0.5, 0, 5);
+      var rule = el('me-rule').value, rname = ME_RULES.filter(function (x) { return x[0] === rule; })[0][1];
+      var closeLab = function (t) { return monthLabel(P, kF + t); }, holdLab = function (t) { return monthLabel(P, kF + t + 1); };
+      var key = meMonthKey(el('me-date').value), t = T, note = '';
+      if (isFinite(key)) {
+        t = key - (P.lo + kF);
+        if (t > T) { t = T; note = 'Your date is after the last month in the data, so the latest month-end (' + closeLab(T) + ') is used. '; }
+      }
+      if (t < 24) { say2(errBox('This date is too early. The earliest month-end that can be used is ' + closeLab(24) + ' (the tool needs 24 earlier months of results).')); return; }
+      var t0 = Math.max(24, t - win), infos = [], tt;
+      if (t - t0 < 12) { say2(errBox('Only ' + (t - t0) + ' earlier months are available before this date. Choose a later date.')); return; }
+      for (tt = t0; tt < t; tt++) {
+        var g0 = gate(lg, tt), pk0 = kpick(C, tt, 0.6, cnt), ov0 = overlapInfo(C, pk0, kF + tt), c0 = meCount(ov0.sets);
+        infos.push({ t: tt, on: g0.on, l: lg[tt], co: c0.co, rk: c0.rk, sets: ov0.sets });
+        if ((tt - t0) % 3 === 0) { say2('<p class="note">Replaying earlier months: ' + (tt - t0) + ' of ' + (t - t0) + '...</p>'); await tick(); }
+      }
+      var SR = {};
+      ME_RULES.forEach(function (x) { SR[x[0]] = meSeries(C, P, kF, infos, x[0], m, minN, sw); });
+      var L = SR[rule].l, n = L.length, S = SR[rule];
+      var gN = gate(lg, t), pkN = kpick(C, t, 0.6, cnt), ovN = overlapInfo(C, pkN, kF + t), cN = meCount(ovN.sets);
+      var infoN = { co: cN.co, rk: cN.rk, sets: ovN.sets };
+      var real = t < T, h = '';
+      var W = {}; ME_RULES.forEach(function (x) { W[x[0]] = meW(x[0], infoN, m, minN, SR[x[0]].lastW); });
+      var order = function (w) { return Object.keys(w).map(Number).sort(function (a, b) { return w[b] - w[a] || cN.co[b] - cN.co[a] || a - b; }); };
+
+      h += '<h3>Decision at the close of ' + esc(closeLab(t)) + ' (money held through ' + esc(holdLab(t)) + ')</h3>';
+      if (note) h += '<p class="note">' + esc(note) + '</p>';
+      h += '<p class="headline">' + (gN.on ? '<b class="good">GREEN: invest in the stock list below</b>' : '<b class="bad">RED: hold the whole list with equal money in every stock</b>') + ' (6-month RSI ' + num(gN.rsi, 0) + ', green above ' + RSI_ON + '). Rule: <b>' + esc(rname) + '</b>, using ' + cnt + ' picked strategies' + (rule === 'ov' || rule === 'sticky' ? ', stocks held by at least ' + m + ' of them, topped up to at least ' + minN + ' stocks' : '') + '.</p>';
+
+      h += '<h3>Strategies picked for this month</h3>';
+      h += tb(['Strategy', 'Filter'], pkN.map(function (j, q) { return '<tr><th class="wrap">' + (q + 1) + '. ' + esc(C.recs[j].name) + '</th><td>' + (C.recs[j].filt ? 'ON' : 'OFF') + '</td></tr>'; }));
+
+      var ks = order(W[rule]);
+      h += '<h3>Stocks to hold (' + ks.length + ')' + (gN.on ? '' : ' if the light turns green') + '</h3>';
+      var hd = ['Stock', 'In how many strategies', 'Money share'];
+      if (real) hd.push('Next month result');
+      h += tb(hd, ks.slice(0, 80).map(function (q) {
+        var f = real ? fwd(P, q, kF + t, 1) : NaN;
+        return '<tr><th>' + esc(P.syms[q]) + '</th><td>' + cN.co[q] + ' of ' + pkN.length + '</td><td>' + pc(W[rule][q], 1) + '</td>' + (real ? '<td class="' + tone(f) + '">' + (isFinite(f) ? pc(f, 1, true) : '-') + '</td>' : '') + '</tr>';
+      }));
+      if (ks.length > 80) h += '<p class="note">Showing the 80 largest of ' + ks.length + '. The download has all of them.</p>';
+      if (!gN.on) h += '<p class="note">The light is red, so the table above is only for reference. The rule says to hold the whole list (equal money in every stock of your list) this month.</p>';
+      h += '<div class="row"><button type="button" class="btn" id="me-dl">Download stock lists (CSV)</button></div>';
+
+      h += '<h3>The same month under the other rules</h3>';
+      h += tb(['Rule', 'Stocks', 'Stock names (largest share first)'], ME_RULES.map(function (x) {
+        var k2 = order(W[x[0]]);
+        return '<tr' + (x[0] === rule ? ' class="on"' : '') + '><th class="wrap">' + esc(x[1]) + '</th><td>' + k2.length + '</td><td class="wrap">' + k2.slice(0, 25).map(function (q) { return esc(P.syms[q]); }).join(', ') + (k2.length > 25 ? ', ...' : '') + '</td></tr>';
+      }));
+
+      /* chances, from earlier months only */
+      var sl = SR[rule], stA = bstat(sl.a, L), stG = bstat(sl.g, L), stL = bstat(L, L);
+      h += '<h3>Chances, from the ' + n + ' months before this date (' + esc(holdLab(t0)) + ' to ' + esc(holdLab(t - 1)) + ')</h3>';
+      var hz = [1, 3, 6, 12];
+      var mkc = function (name, r) {
+        return hz.map(function (x) {
+          var a = broll(r, L, x), b = bboot(r, L, x, 3000, 300 + x);
+          return '<tr><th class="wrap">' + esc(name) + ', ' + x + (x === 1 ? ' month' : ' months') + '</th><td class="' + (a.lose > 0.3 ? 'bad' : '') + '">' + pc(a.lose, 0) + '</td><td>' + pc(a.win, 0) + '</td><td class="' + (b.lose > 0.3 ? 'bad' : '') + '">' + pc(b.lose, 0) + '</td><td>' + pc(b.win, 0) + '</td></tr>';
+        });
+      };
+      var crows = mkc('Rule on green, list on red', sl.g).concat(mkc('Rule always', sl.a));
+      hz.forEach(function (x) { var a = broll(L, L, x), b = bboot(L, L, x, 3000, 340 + x); crows.push('<tr><th class="wrap">Plain list, ' + x + (x === 1 ? ' month' : ' months') + '</th><td>' + pc(a.lose, 0) + '</td><td>-</td><td>' + pc(b.lose, 0) + '</td><td>-</td></tr>'); });
+      h += tb(['Way to invest', 'Lose money (past)', 'Beat list (past)', 'Lose money (reshuffled)', 'Beat list (reshuffled)'], crows);
+      var same = [], i;
+      for (i = 0; i < n; i++) if (infos[i].on === gN.on) same.push(i);
+      if (same.length >= 6) {
+        var lo2 = 0, bt2 = 0, up2 = 0;
+        same.forEach(function (j) { if (sl.a[j] < 0) lo2++; if (sl.a[j] > L[j]) bt2++; if (sl.a[j] > 0) up2++; });
+        h += '<p class="note">In the ' + same.length + ' earlier months that had a ' + (gN.on ? 'green' : 'red') + ' light like now, the rule (always invested) made money in <b>' + pc(up2 / same.length, 0) + '</b>, lost money in ' + pc(lo2 / same.length, 0) + ' and beat the list in <b>' + pc(bt2 / same.length, 0) + '</b>.</p>';
+      }
+      h += '<p class="note"><b>Past</b> uses every real run of that many months before this date. <b>Reshuffled</b> draws months at random from those same months. Both only describe the past, they are not a promise. Shorter windows have fewer runs, so treat 1 and 3 month chances as rough.</p>';
+
+      h += '<h3>How each rule did in those months</h3>';
+      var wr = function (name, s, q, isL, on) {
+        return '<tr' + (on ? ' class="on"' : '') + '><th class="wrap">' + esc(name) + '</th><td class="' + tone(s.cagr) + '">' + pc(s.cagr, 1, true) + '</td><td>' + pc(s.up, 0) + '</td><td>' + (isL ? '-' : pc(s.beat, 0)) + '</td><td class="bad">' + pc(s.dd, 1, true) + '</td><td>' + (q ? num(q.avgN, 0) : '-') + '</td></tr>';
+      };
+      var trs = [wr('Plain list', stL, null, true, false)];
+      ME_RULES.forEach(function (x) { trs.push(wr(x[1] + ' (always)', bstat(SR[x[0]].a, L), SR[x[0]], false, x[0] === rule)); });
+      ME_RULES.forEach(function (x) { trs.push(wr(x[1] + ' (green, list on red)', bstat(SR[x[0]].g, L), SR[x[0]], false, false)); });
+      h += tb(['Rule', 'Per year', 'Months up', 'Beat list', 'Biggest fall', 'Stocks held'], trs);
+      h += '<p class="note">Do not pick the best row of this table and expect it to repeat. The rules differ by a little, and a small gap over a few years is within luck. Prefer a rule that is near the top on Per year, has a small Biggest fall and holds at least ' + minN + ' stocks.</p>';
+
+      if (real) {
+        var rr = meRet(P, W[rule], kF + t, NaN), ll = lg[t], gg = gN.on ? rr : ll;
+        h += '<h3>What happened in ' + esc(holdLab(t)) + ' (already known)</h3>';
+        h += '<p class="note">Rule always: <b class="' + tone(rr) + '">' + pc(rr, 1, true) + '</b>. Rule on ' + (gN.on ? 'green' : 'red') + ' light: <b class="' + tone(gg) + '">' + pc(gg, 1, true) + '</b>. Plain list: ' + pc(ll, 1, true) + '. (Trading cost not taken off here.)</p>';
+      }
+      h += '<p class="note">Use this at the close of the month. If the light changed colour, switch; otherwise rebalance to the new list. Your stock list holds today’s stocks, so old months look better than real time would have, and the strategy picks and the light were tuned on this same history. Research tool, not investment advice.</p>';
+
+      /* data for the CSV */
+      var csv = ['Close month,Rule,Light,Stock,In strategies,Money share'];
+      ME_RULES.forEach(function (x) {
+        order(W[x[0]]).forEach(function (q) { csv.push([closeLab(t), '"' + x[1] + '"', gN.on ? 'green' : 'red', P.syms[q], cN.co[q], (W[x[0]][q] * 100).toFixed(2) + '%'].join(',')); });
+      });
+      ME_LAST = { text: csv.join(String.fromCharCode(10)), name: 'month_end_' + closeLab(t).replace(' ', '_') + '.csv' };
+      say2(h);
+      var bd = el('me-dl');
+      if (bd) bd.addEventListener('click', function () { if (ME_LAST) meSave(ME_LAST.text, ME_LAST.name); });
+    } catch (e) {
+      say2(errBox('Something went wrong: ' + (e && e.message ? e.message : e)));
+    } finally { MEBUSY = false; }
+  }
+  function mountMonthEnd() {
+    var seg = document.querySelector('.seg[role="tablist"]'), dl = el('tab-dl');
+    if (!seg || !dl || el('tab-me')) return;
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'tabbtn'; b.setAttribute('role', 'tab'); b.dataset.tab = 'me'; b.setAttribute('aria-selected', 'false'); b.textContent = 'Month-end';
+    var blb = seg.querySelector('[data-tab="bl"]');
+    seg.insertBefore(b, blb ? blb.nextSibling : seg.firstChild);
+    var s = document.createElement('section');
+    s.className = 'tab'; s.id = 'tab-me'; s.hidden = true;
+    s.innerHTML = '<div class="card" id="me-card"><h2>Month-end: strategy, chances and stock list for a date</h2>' +
+      '<p class="note">Give the closing date of a month. The tool picks the strategies using only months before that date, shows the green or red light, the chance of losing money or beating the list (from earlier months only), and the list of stocks with money shares. For a past date it also shows what really happened next month. Leave the date blank for the latest month-end.</p>' +
+      '<p class="note" id="me-ds" role="status"></p>' +
+      '<div class="fields">' +
+      '<div class="field"><div class="lab"><label for="me-date">Date (month-end close; blank = latest)</label></div><input id="me-date" type="date"></div>' +
+      '<div class="field"><div class="lab"><label for="me-rule">Rule for the stock list</label></div><select id="me-rule">' + ME_RULES.map(function (x) { return '<option value="' + x[0] + '">' + x[1] + '</option>'; }).join('') + '</select></div>' +
+      '<div class="field"><div class="lab"><label for="me-n">Strategies to use (2 to 40)</label></div><input id="me-n" type="number" inputmode="numeric" min="2" max="40" step="1" value="15"></div>' +
+      '<div class="field"><div class="lab"><label for="me-m">Overlap: held by at least this many strategies</label></div><input id="me-m" type="number" inputmode="numeric" min="2" max="40" step="1" value="9"></div>' +
+      '<div class="field"><div class="lab"><label for="me-min">Fill up to at least this many stocks</label></div><input id="me-min" type="number" inputmode="numeric" min="1" max="60" step="1" value="10"></div>' +
+      '<div class="field"><div class="lab"><label for="me-win">Earlier months used for the chances (12 to 240)</label></div><input id="me-win" type="number" inputmode="numeric" min="12" max="240" step="1" value="60"></div>' +
+      '<div class="field"><div class="lab"><label for="me-sw">Cost each time the light changes colour (% of money)</label></div><input id="me-sw" type="number" inputmode="decimal" min="0" max="5" step="0.05" value="0.5"></div>' +
+      '</div>' +
+      '<div class="row"><button type="button" class="btn" id="me-run">Show month-end plan</button></div>' +
+      '<div id="me-out" class="out"></div></div>' +
+      '<div class="out" id="out-me"></div>';
+    dl.parentNode.insertBefore(s, dl);
+    ['input', 'change'].forEach(function (t) { s.addEventListener(t, function (e) { e.stopPropagation(); }); });
+    el('me-run').addEventListener('click', runMe);
+    window.COMPUTE = window.COMPUTE || {}; window.RENDER = window.RENDER || {};
+    COMPUTE.me = function () { return {}; }; RENDER.me = function () { return ''; };
+    var st = window.setTab;
+    window.setTab = function (t) { st(t); var r = el('range'); if (t === 'me') { if (r) r.hidden = true; meStatus(); } };
+    meStatus();
+  }
+  function meStatus() {
+    var e = el('me-ds'); if (!e) return;
+    var P = PK_CACHE && PK_CACHE.P;
+    e.textContent = 'Prices: ' + (PKS.store.demo ? 'example list (made up)' : (P ? P.syms.length : Object.keys(PKS.store.stocks).length) + ' stocks loaded') + '. Stocks and settings (stocks per strategy, cost, exit rank, stop-loss) come from the Picks tab, where you load them.';
+  }
+
   mountBlend();
   mountPlus();
+  mountMonthEnd();
 })();
 
 /* ===== Monthly strategy advisor: price, volume, indicators, 8 ingredients ===== */
