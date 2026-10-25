@@ -3325,7 +3325,7 @@ var VOL = {};
       if (t0 < MIN_T || t0 > T) { say2(errBox('Pick a closing month between ' + close(MIN_T) + ' and ' + close(T) + ' (the earliest needs 24 earlier months of results).')); return; }
       var fm = msReadMonth('il-from'), tm = msReadMonth('il-to');
       var lo = isFinite(fm) ? Math.max(MIN_T, fm - P.lo - kF - 1) : MIN_T, hi = isFinite(tm) ? Math.min(T - 1, tm - P.lo - kF - 1) : T - 1;
-      if (hi - lo < 11) { say2(errBox('The backtest window needs at least 12 months between ' + lab(MIN_T) + ' and ' + lab(T - 1) + '.')); return; }
+      if (hi < lo) { say2(errBox('The backtest must end in or after its start month. The tool can test ' + lab(MIN_T) + ' to ' + lab(T - 1) + '.')); return; }
       var warn = (PKS && PKS.store && PKS.store.demo) ? '<p class="headline"><b class="bad">These prices are the built-in example list (made up), not your stocks.</b> Nothing below means anything for real investing. Load your stocks in the Picks tab, then run again.</p>' : '';
       var h = '', d = '';
       /* ---------- stock lists for the date you give ---------- */
@@ -3377,6 +3377,25 @@ var VOL = {};
       for (tt = lo; tt <= hi; tt++) { pmB[tt] = msPick(C, F, tt, optB); if (pmB[tt]) { pm[tt] = Object.assign({}, pmB[tt], { ix: pmB[tt].ix.slice(0, opt.cnt) }); vm[tt] = msVotes(C, pm[tt].ix, tt, opt, null); } if (tt % 12 === 0) await tick(); }
       var mr = [], prevW = {}, L = [];
       for (tt = lo; tt <= hi; tt++) { var mm = pm[tt] ? msMonthRet(C, vm[tt], rule, K, tt, nameIx, prevW) : { r: lg[tt], w: {} }; mr.push(mm.r); L.push(lg[tt]); prevW = mm.w; }
+      if (hi - lo < 11) {
+        var sh = '<h2>Short test: ' + esc(lab(lo)) + (hi > lo ? ' to ' + esc(lab(hi)) : '') + ' (' + mr.length + ' month' + (mr.length > 1 ? 's' : '') + ')</h2><p class="note">Each month was decided at the close of the month before, using only earlier months. A window under 12 months is shown month by month, because yearly growth figures need at least a year.</p>';
+        var srows = [], si, sg2 = 1, sl2 = 1;
+        for (si = 0; si < mr.length; si++) {
+          var tq = lo + si, rk5 = 1, bs5 = -Infinity, g5 = G[tq]; for (j = 0; j < M; j++) { if (g5[j] > mr[si]) rk5++; if (g5[j] > bs5) bs5 = g5[j]; }
+          sg2 *= 1 + mr[si]; sl2 *= 1 + L[si];
+          srows.push('<tr' + (rk5 <= 10 ? ' class="on"' : '') + '><th>' + esc(lab(tq)) + '</th><td>' + esc(close(tq)) + '</td><td class="' + tone(mr[si]) + '">' + pc(mr[si], 1, true) + '</td><td class="' + tone(L[si]) + '">' + pc(L[si], 1, true) + '</td><td class="' + tone(mr[si] - L[si]) + '">' + pc(mr[si] - L[si], 1, true) + '</td><td>' + rk5 + ' of ' + M + '</td><td class="good">' + pc(bs5, 1, true) + '</td></tr>');
+        }
+        sh += tb(['Month held', 'Decided at close of', 'Monthly plan', 'Plain list', 'Plan minus list', 'Rank among ' + M, 'Best strategy that month'], srows);
+        if (mr.length > 1) sh += '<p class="headline">All ' + mr.length + ' months together: monthly plan <b class="' + tone(sg2 - sl2) + '">' + pc(sg2 - 1, 1, true) + '</b>, plain list ' + pc(sl2 - 1, 1, true) + '.</p>';
+        for (si = 0; si < Math.min(mr.length, 6); si++) {
+          var tq2 = lo + si; if (!pm[tq2]) continue;
+          var sp2 = msRule(vm[tq2], rule, K);
+          sh += '<h3>Stocks for ' + esc(lab(tq2)) + ' (decided at the close of ' + esc(close(tq2)) + ')</h3>' + tb(['Stock', 'Strategies holding it (of ' + opt.cnt + ')', 'Share of the money', 'Result in ' + lab(tq2)], sp2.map(function (x) { var f2 = msStockRet(P, nameIx, x.d, kF + tq2, PK_OPT.sl); return '<tr><th class="wrap">' + esc(x.d.name) + '</th><td>' + x.d.votes + '</td><td>' + (x.w * 100).toFixed(1) + '%</td><td class="' + tone(f2) + '">' + (isFinite(f2) ? pc(f2, 1, true) : 'n/a') + '</td></tr>'; }));
+        }
+        if (mr.length > 6) sh += '<p class="note">Stock lists are shown for the first 6 months only.</p>';
+        sh += '<p class="note">One month is mostly luck, so judge the plan on many months. Your stock list holds today’s stocks, so old months look better than real time would have. Research tool, not investment advice.</p>';
+        say2(warn + d + sh); return;
+      }
       var anchor = (((P.lo + kF + t0) % 12) + 12) % 12, isRev = function (t1) { return (((P.lo + kF + t1) % 12) + 12) % 12 === anchor; };
       var fr = -1; for (tt = lo; tt <= hi; tt++) if (isRev(tt)) { fr = tt; break; }
       var fixedCagr = function (a, b) { var out = [], q, i; for (q = 0; q < M; q++) { var p = 1; for (i = a; i <= b; i++) p *= 1 + G[i][q]; out.push(Math.pow(p, 12 / (b - a + 1)) - 1); } return out; };
