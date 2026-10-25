@@ -3199,8 +3199,163 @@ var VOL = {};
     window.setTab = function (t) { st(t); var r = el('range'); if (r) r.hidden = (t === 'pk' || t === 'bl' || t === 'ms'); };
   }
 
+  /* ================= Ingredient learning tab: stock lists for next month and next year, and backtests by date ================= */
+  var ILBUSY = false, IL_LAST = null;
+  async function runIL() {
+    if (ILBUSY) return;
+    ILBUSY = true;
+    var o = el('il-out'), say2 = function (h) { o.innerHTML = h; };
+    try {
+      say2('<p class="note">Preparing...</p>');
+      var C = await build(say2);
+      if (C.err) { say2(errBox(C.err)); return; }
+      var P = C.P, T = C.T, M = C.M, lg = C.lg, G = C.G, kF = C.kFirst, N = C.N, wts = weightsFor(PK_WM, N), MIN_T = 24, t, j, tt;
+      var VS = volSeries(P, kF, T), F = msFeatures(C, VS);
+      MS_FRESH = el('il-fresh').value === 'fresh';
+      var kinds = MS_SIG.filter(function (g) { return el('il-s-' + g[0]) && el('il-s-' + g[0]).checked; }).map(function (g) { return g[0]; });
+      if (!kinds.length) kinds = ['l3'];
+      var yN = Math.min(M, Math.max(2, Math.round(val('il-yn', 5, 2, 40)))), yMin = Math.max(3, Math.round(val('il-ymin', 15, 3, 60)));
+      var opt = { kinds: kinds, bw: val('il-bw', 0.6, 0.1, 3), hl: val('il-hl', 240, 6, 240), cnt: Math.min(M, Math.max(2, Math.round(val('il-n', 5, 2, 40)))), score: 'ing', sw: 'eq' };
+      var optY = Object.assign({}, opt, { cnt: yN });
+      var K = Math.max(3, Math.round(val('il-k', 10, 3, 60))), rule = el('il-rule').value;
+      var lab = function (x) { return monthLabel(P, kF + x + 1); }, close = function (x) { return monthLabel(P, kF + x); };
+      var nameIx = {}; P.syms.forEach(function (s, i) { nameIx[s] = i; });
+      var cm = msReadMonth('il-date'), t0 = isFinite(cm) ? cm - P.lo - kF : T;
+      if (t0 < MIN_T || t0 > T) { say2(errBox('Pick a closing month between ' + close(MIN_T) + ' and ' + close(T) + ' (the earliest needs 24 earlier months of results).')); return; }
+      var fm = msReadMonth('il-from'), tm = msReadMonth('il-to');
+      var lo = isFinite(fm) ? Math.max(MIN_T, fm - P.lo - kF - 1) : MIN_T, hi = isFinite(tm) ? Math.min(T - 1, tm - P.lo - kF - 1) : T - 1;
+      if (hi - lo < 11) { say2(errBox('The backtest window needs at least 12 months between ' + lab(MIN_T) + ' and ' + lab(T - 1) + '.')); return; }
+      var warn = (PKS && PKS.store && PKS.store.demo) ? '<p class="headline"><b class="bad">These prices are the built-in example list (made up), not your stocks.</b> Nothing below means anything for real investing. Load your stocks in the Picks tab, then run again.</p>' : '';
+      var h = '', d = '';
+      /* ---------- stock lists for the date you give ---------- */
+      var pkM = msPick(C, F, t0, opt), pkY = msPick(C, F, t0, optY);
+      var ySelAt = function (pk, r, om) {
+        var vt = msVotes(C, pk.ix, r, { sw: 'eq' }, om), arr = Object.keys(vt.V).map(function (k) { return vt.V[k]; });
+        arr.sort(function (a, b) { return b.votes - a.votes || b.w - a.w || (a.name < b.name ? -1 : 1); });
+        var need = Math.max(2, Math.ceil(pk.ix.length / 2)), sel = arr.filter(function (x) { return x.votes >= need; });
+        if (sel.length < yMin) sel = arr.slice(0, yMin);
+        return sel;
+      };
+      d += '<h2>Plan after the close of ' + esc(close(t0)) + '</h2>';
+      if (!pkM || !pkY) d += '<p class="note">Not enough similar months to pick.</p>';
+      else {
+        if (pkM.lb) {
+          var lrows = MS_ING.map(function (g, ii) { var a = pkM.lb[ii * 3] * 100, b = pkM.lb[ii * 3 + 1] * 100, c2 = pkM.lb[ii * 3 + 2] * 100, mx = Math.max(a, b, c2), verdict = mx < 3 ? 'No clear preference' : (mx === c2 ? '<b class="good">Should be positive</b>' : (mx === a ? '<b class="bad">Should be negative</b>' : 'Should be absent')); var cell = function (x) { return '<td class="' + (x >= 3 ? 'good' : (x <= -3 ? 'bad' : '')) + '">' + (x >= 0 ? '+' : '') + x.toFixed(0) + '</td>'; }; return '<tr><th class="wrap">' + g[1] + '</th>' + cell(c2) + cell(a) + cell(b) + '<td>' + verdict + '</td></tr>'; });
+          var fa = pkM.lfb[1] * 100;
+          lrows.push('<tr><th class="wrap">Filter (stock needs rising trend)</th><td class="' + (fa >= 3 ? 'good' : (fa <= -3 ? 'bad' : '')) + '">' + (fa >= 0 ? '+' : '') + fa.toFixed(0) + ' (ON)</td><td></td><td></td><td>' + (Math.abs(fa) < 3 ? 'No clear preference' : (fa > 0 ? '<b class="good">Filter ON</b>' : '<b class="bad">Filter OFF</b>')) + '</td></tr>');
+          d += '<h3>What the tool learned: ingredients of the winners</h3><p class="note">In earlier months with a market like now (' + kinds.map(function (k2) { return MS_SIG.filter(function (g) { return g[0] === k2; })[0][1].toLowerCase(); }).join(', ') + '), the best 10% of the ' + M + ' strategies each month are compared with all strategies. Each number is how many percentage points more (green) or less (red) often than chance the winners had the ingredient positive, negative or absent. The strategies below are the ones whose ingredients match this profile best.</p>' + tb(['Ingredient', 'Positive', 'Negative', 'Absent', 'Verdict'], lrows);
+        }
+        /* monthly */
+        var om0 = t0 === T ? msOpen(C, pkM.ix, wts) : null, vtM = msVotes(C, pkM.ix, t0, opt, om0), spM = msRule(vtM, rule, K);
+        var prevSp = null; if (t0 - 1 >= MIN_T) { var pkp = msPick(C, F, t0 - 1, opt); if (pkp) prevSp = msRule(msVotes(C, pkp.ix, t0 - 1, opt, null), rule, K); }
+        var prevNames = prevSp ? prevSp.map(function (x) { return x.d.name; }) : [], curNames = spM.map(function (x) { return x.d.name; });
+        d += '<h3>Monthly plan: hold during ' + esc(lab(t0)) + ' (' + spM.length + ' stocks)</h3>';
+        d += tb(['#', 'Strategy', 'Filter'], pkM.ix.map(function (jj, i) { var r = C.recs[jj]; return '<tr><th>' + (i + 1) + '</th><td class="wrap">' + esc(r.name) + '</td><td>' + (r.filt ? 'ON' : 'OFF') + '</td></tr>'; }));
+        d += tb(['Stock', 'Strategies holding it (of ' + opt.cnt + ')', 'Share of the money'].concat(prevSp ? ['Status'] : []).concat(t0 < T ? ['Result in ' + lab(t0)] : []), spM.map(function (x) {
+          var f = t0 < T ? msStockRet(P, nameIx, x.d, kF + t0, PK_OPT.sl) : NaN;
+          return '<tr><th class="wrap">' + esc(x.d.name) + '</th><td>' + x.d.votes + '</td><td>' + (x.w * 100).toFixed(1) + '%</td>' + (prevSp ? '<td class="' + (prevNames.indexOf(x.d.name) < 0 ? 'good' : '') + '">' + (prevNames.indexOf(x.d.name) < 0 ? 'New' : 'Keep') + '</td>' : '') + (t0 < T ? '<td class="' + tone(f) + '">' + (isFinite(f) ? pc(f, 1, true) : 'n/a') + '</td>' : '') + '</tr>';
+        }));
+        var sells = prevNames.filter(function (s) { return curNames.indexOf(s) < 0; });
+        d += '<p class="note"><b class="bad">Sell (' + sells.length + '):</b> ' + (sells.length ? sells.map(esc).join(', ') : 'none') + '. Check again at the next month-end.</p>';
+        /* yearly */
+        var omY = t0 === T ? msOpen(C, pkY.ix, wts) : null, selY = ySelAt(pkY, t0, omY);
+        d += '<h3>Yearly plan: buy now and hold ' + (selY.length) + ' stocks for 12 months</h3>';
+        d += tb(['#', 'Strategy', 'Filter'], pkY.ix.map(function (jj, i) { var r = C.recs[jj]; return '<tr><th>' + (i + 1) + '</th><td class="wrap">' + esc(r.name) + '</td><td>' + (r.filt ? 'ON' : 'OFF') + '</td></tr>'; }));
+        d += tb(['Stock', 'Strategies holding it (of ' + yN + ')', 'Share of the money'].concat(t0 + 12 <= T ? ['Result over the next 12 months'] : []), selY.map(function (x) {
+          var q = nameIx[x.name], f = (q !== undefined && t0 + 12 <= T) ? fwd(P, q, kF + t0, 12) : NaN;
+          return '<tr><th class="wrap">' + esc(x.name) + '</th><td>' + x.votes + '</td><td>' + (100 / selY.length).toFixed(1) + '%</td>' + (t0 + 12 <= T ? '<td class="' + tone(f) + '">' + (isFinite(f) ? pc(f, 1, true) : 'n/a') + '</td>' : '') + '</tr>';
+        }));
+        d += '<p class="note">Equal money in each stock, held until the same month next year with no changes in between. With 50-50, put half your money in the monthly plan and half in the yearly plan. ' + (function () { var both = selY.filter(function (x) { return curNames.indexOf(x.name) >= 0; }).length; return both ? both + ' stocks appear in both plans and so get double money.' : 'No stock appears in both plans.'; })() + '</p>';
+        d += '<div class="row"><button type="button" class="btn ghost" id="il-dl">Download both stock lists (CSV)</button></div>';
+        IL_LAST = { month: close(t0), m: spM.map(function (x) { return [x.d.name, x.d.votes, (x.w * 100).toFixed(2)]; }), y: selY.map(function (x) { return [x.name, x.votes, (100 / selY.length).toFixed(2)]; }) };
+      }
+      /* ---------- backtest ---------- */
+      say2(warn + d + '<p class="note">Backtesting ' + lab(lo) + ' to ' + lab(hi) + '...</p>'); await tick();
+      var pm = {}, vm = {};
+      for (tt = lo; tt <= hi; tt++) { pm[tt] = msPick(C, F, tt, opt); if (pm[tt]) vm[tt] = msVotes(C, pm[tt].ix, tt, opt, null); if (tt % 12 === 0) await tick(); }
+      var mr = [], prevW = {}, L = [];
+      for (tt = lo; tt <= hi; tt++) { var mm = pm[tt] ? msMonthRet(C, vm[tt], rule, K, tt, nameIx, prevW) : { r: lg[tt], w: {} }; mr.push(mm.r); L.push(lg[tt]); prevW = mm.w; }
+      var anchor = (((P.lo + kF + t0) % 12) + 12) % 12, isRev = function (t1) { return (((P.lo + kF + t1) % 12) + 12) % 12 === anchor; };
+      var fr = -1; for (tt = lo; tt <= hi; tt++) if (isRev(tt)) { fr = tt; break; }
+      var fixedCagr = function (a, b) { var out = [], q, i; for (q = 0; q < M; q++) { var p = 1; for (i = a; i <= b; i++) p *= 1 + G[i][q]; out.push(Math.pow(p, 12 / (b - a + 1)) - 1); } return out; };
+      var rankIn = function (c, a, b) { var r = 1; fixedCagr(a, b).forEach(function (v) { if (v > c) r++; }); return r; };
+      var row = function (name, ser, Ls, a, b, bold) { var q = bstat(ser, Ls), isL = name === 'Plain list'; return '<tr' + (bold ? ' class="on"' : '') + '><th class="wrap">' + (bold ? '<b>' + name + '</b>' : name) + '</th><td class="' + tone(q.cagr - q.lcagr) + '">' + pc(q.cagr, 1, true) + '</td><td>' + num(q.mult, 1) + 'x</td><td>' + pc(q.up, 0) + '</td><td>' + (isL ? '-' : pc(q.beat, 0)) + '</td><td class="bad">' + pc(q.dd, 1, true) + '</td><td>' + rankIn(q.cagr, a, b) + '</td></tr>'; };
+      var hd = ['Way to invest', 'Per year', 'Total multiple', 'Months up', 'Beat list', 'Biggest fall', 'Rank of ' + M];
+      h += '<h2>Backtest ' + esc(lab(lo)) + ' to ' + esc(lab(hi)) + ' (' + mr.length + ' months)</h2><p class="note">Every month uses only earlier months. Strategies and stocks follow your Picks settings (stop-loss ' + PK_OPT.sl + '%, exit rank ' + (C.ex || 'off') + ', ' + N + ' stocks each). Costs are charged on every change.</p>';
+      var sM = bstat(mr, L);
+      h += '<h3>Monthly plan alone</h3><p class="headline">Grew <b class="' + tone(sM.cagr - sM.lcagr) + '">' + pc(sM.cagr, 1) + '</b> a year, against ' + pc(sM.lcagr, 1) + ' for the plain list; rank <b>' + rankIn(sM.cagr, lo, hi) + '</b> among the ' + M + ' fixed strategies over the same months.</p>' + tb(hd, [row('Plain list', L, L, lo, hi), row('Monthly plan (' + opt.cnt + ' strategies, ' + K + ' stocks)', mr, L, lo, hi, true)]);
+      var hf = Math.floor(mr.length / 2), a1 = bstat(mr.slice(0, hf), L.slice(0, hf)), a2 = bstat(mr.slice(hf), L.slice(hf));
+      h += tb(['Period', 'Monthly plan per year', 'List per year', 'Beat list', 'Rank of ' + M], [['Earlier half: ' + lab(lo) + ' to ' + lab(lo + hf - 1), a1, lo, lo + hf - 1], ['Later half: ' + lab(lo + hf) + ' to ' + lab(hi), a2, lo + hf, hi]].map(function (z) { return '<tr><th class="wrap">' + esc(z[0]) + '</th><td class="' + tone(z[1].cagr) + '">' + pc(z[1].cagr, 1, true) + '</td><td>' + pc(z[1].lcagr, 1, true) + '</td><td>' + pc(z[1].beat, 0) + '</td><td>' + rankIn(z[1].cagr, z[2], z[3]) + '</td></tr>'; }));
+      /* yearly and 50-50 */
+      if (fr < 0 || hi - fr < 11) h += '<h3>Yearly plan and 50-50</h3><p class="note">The backtest window needs a full year after the first yearly buy (the same calendar month as your date, ' + esc(close(t0).split(' ')[0]) + '). Widen the dates.</p>';
+      else {
+        var Y = [], LY = [], MY = [], prevSet = null, cacheY = {}, ys = [];
+        for (tt = fr; tt <= hi; tt++) {
+          var r1 = tt - ((tt - fr) % 12), hdY = cacheY[r1];
+          if (hdY === undefined) { var pk1 = msPick(C, F, r1, optY); hdY = cacheY[r1] = pk1 ? ySelAt(pk1, r1, null).map(function (x) { return x.name; }) : null; if (r1 > fr + 0 || true) ys.push(r1); }
+          var yr = lg[tt];
+          if (hdY) { var sm = 0, cn = 0; hdY.forEach(function (nm) { var q = nameIx[nm]; if (q === undefined) return; var f = fwd(P, q, kF + tt, 1); if (isFinite(f)) { sm += f; cn++; } }); yr = cn ? sm / cn : lg[tt]; }
+          if (tt === r1) { var frac = 1; if (prevSet && hdY) { var ov = hdY.filter(function (x) { return prevSet.indexOf(x) >= 0; }).length; frac = 1 - ov / Math.max(prevSet.length, hdY.length); } yr -= C.cost / 100 * frac; prevSet = hdY; }
+          Y.push(yr); LY.push(lg[tt]); MY.push(mr[tt - lo]);
+        }
+        var B = Y.map(function (v, i) { return 0.5 * v + 0.5 * MY[i]; }), ny = Y.length;
+        h += '<h3>Yearly plan and the 50-50 mix (' + lab(fr) + ' to ' + lab(hi) + ', ' + ny + ' months)</h3><p class="note">The yearly plan buys at the close of ' + esc(close(t0).split(' ')[0]) + ' each year and holds the stocks fixed for 12 months (equal money, no changes in between). The 50-50 mix puts half in each plan.</p>';
+        h += tb(hd, [row('Plain list', LY, LY, fr, hi), row('Monthly plan alone', MY, LY, fr, hi), row('Yearly plan alone', Y, LY, fr, hi), row('50-50 monthly and yearly', B, LY, fr, hi, true)]);
+        var h2 = Math.floor(ny / 2), b1 = bstat(B.slice(0, h2), LY.slice(0, h2)), b2 = bstat(B.slice(h2), LY.slice(h2)), y1 = bstat(Y.slice(0, h2), LY.slice(0, h2)), y2 = bstat(Y.slice(h2), LY.slice(h2));
+        h += tb(['Period', 'Yearly plan per year', '50-50 per year', 'List per year'], [['Earlier half: ' + lab(fr) + ' to ' + lab(fr + h2 - 1), y1, b1], ['Later half: ' + lab(fr + h2) + ' to ' + lab(hi), y2, b2]].map(function (z) { return '<tr><th class="wrap">' + esc(z[0]) + '</th><td class="' + tone(z[1].cagr) + '">' + pc(z[1].cagr, 1, true) + '</td><td class="' + tone(z[2].cagr) + '">' + pc(z[2].cagr, 1, true) + '</td><td>' + pc(z[1].lcagr, 1, true) + '</td></tr>'; }));
+      }
+      /* month by month rank of the monthly plan */
+      var c10 = 0, c25 = 0, rs = 0, mrk = [], nn = mr.length;
+      for (var i4 = 0; i4 < nn; i4++) { var rk4 = 1, bs4 = -Infinity, g4 = G[lo + i4]; for (j = 0; j < M; j++) { if (g4[j] > mr[i4]) rk4++; if (g4[j] > bs4) bs4 = g4[j]; } mrk.push({ i: i4, rk: rk4, best: bs4 }); rs += rk4; if (rk4 <= 10) c10++; if (rk4 <= Math.ceil(M * 0.25)) c25++; }
+      h += '<h3>Month by month: rank of the monthly plan among the ' + M + ' strategies</h3><p class="note">Top 10 in ' + c10 + ' of ' + nn + ' months (' + pc(c10 / nn, 0) + '; chance alone about ' + pc(10 / M, 0) + '), top 25% in ' + pc(c25 / nn, 0) + ', average rank ' + num(rs / nn, 0) + '.</p>';
+      h += tb(['Month held', 'Your rank', 'Your result', 'Plain list', 'That month’s #1'], mrk.slice().reverse().slice(0, 36).map(function (x) { return '<tr' + (x.rk <= 10 ? ' class="on"' : '') + '><th>' + esc(lab(lo + x.i)) + '</th><td class="' + (x.rk <= 10 ? 'good' : '') + '">' + x.rk + '</td><td class="' + tone(mr[x.i]) + '">' + pc(mr[x.i], 1, true) + '</td><td class="' + tone(L[x.i]) + '">' + pc(L[x.i], 1, true) + '</td><td class="good">' + pc(x.best, 1, true) + '</td></tr>'; }));
+      h += '<p class="note">The table shows the latest 36 months of the window. Your stock list holds today’s stocks, so old months look better than real time would have. The settings were chosen after looking at this history, so expect lower results live. Research tool, not investment advice.</p>';
+      say2(warn + d + h);
+      var dl = el('il-dl'); if (dl) dl.addEventListener('click', function () {
+        if (!IL_LAST) return; var csv = 'Closing month,' + IL_LAST.month + '\nMONTHLY PLAN\nStock,Strategies holding,Share of money %\n' + IL_LAST.m.map(function (r) { return r.join(','); }).join('\n') + '\nYEARLY PLAN\nStock,Strategies holding,Share of money %\n' + IL_LAST.y.map(function (r) { return r.join(','); }).join('\n') + '\n';
+        var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'ingredient_learning_' + IL_LAST.month.replace(/\s+/g, '_') + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+      });
+    } catch (e) { say2(errBox('Something went wrong: ' + (e && e.message ? e.message : e))); }
+    finally { ILBUSY = false; }
+  }
+  function mountIL() {
+    var seg = document.querySelector('.seg[role="tablist"]'), dl = el('tab-dl');
+    if (!seg || !dl || el('tab-il')) return;
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'tabbtn'; b.setAttribute('role', 'tab'); b.dataset.tab = 'il'; b.setAttribute('aria-selected', 'false'); b.textContent = 'Ingredient learning';
+    var ref = seg.querySelector('[data-tab="ms"]') || seg.querySelector('[data-tab="bl"]');
+    seg.insertBefore(b, ref ? ref.nextSibling : seg.firstChild);
+    var s = document.createElement('section');
+    s.className = 'tab'; s.id = 'tab-il'; s.hidden = true;
+    var sig = MS_SIG.map(function (g, i) { return '<label class="chk"><input type="checkbox" id="il-s-' + g[0] + '"' + (i < 1 ? ' checked' : '') + '> ' + g[1] + '</label>'; }).join('<br>');
+    s.innerHTML = '<div class="card" id="il-card"><h2>Ingredient learning: stock lists and backtest</h2>' +
+      '<p class="note">The tool studies which ingredients (12m, 6m, 3m, 1m, calm and the per-risk versions, and the filter) the best strategies had, and which they did not, in earlier months with a market like now. It then picks the strategies that match, and gives you a monthly stock list (10 stocks) and a yearly stock list (15 stocks held for 12 months). Give the month you are deciding at the close of (blank = latest) for the lists, and a from and to month for the backtest. Uses the stop-loss, exit rank and stock count from the Picks tab.</p>' +
+      '<div class="fields">' +
+      '<div class="field"><div class="lab"><label for="il-date">Closing month for the stock lists (blank = latest)</label></div><input id="il-date" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="il-from">Backtest from month (blank = start)</label></div><input id="il-from" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="il-to">Backtest to month (blank = latest)</label></div><input id="il-to" type="month"></div>' +
+      '<div class="field"><div class="lab"><label for="il-n">Monthly plan: strategies (2 to 40)</label></div><input id="il-n" type="number" inputmode="numeric" min="2" max="40" step="1" value="5"></div>' +
+      '<div class="field"><div class="lab"><label for="il-k">Monthly plan: stocks to hold (3 to 60)</label></div><input id="il-k" type="number" inputmode="numeric" min="3" max="60" step="1" value="10"></div>' +
+      '<div class="field"><div class="lab"><label for="il-rule">Monthly plan: money between stocks</label></div><select id="il-rule"><option value="votek" selected>In proportion to votes</option><option value="topk">Equal in each stock</option><option value="overlap">Overlap: only stocks held by half or more</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="il-yn">Yearly plan: strategies (2 to 40)</label></div><input id="il-yn" type="number" inputmode="numeric" min="2" max="40" step="1" value="5"></div>' +
+      '<div class="field"><div class="lab"><label for="il-ymin">Yearly plan: minimum stocks (3 to 60)</label></div><input id="il-ymin" type="number" inputmode="numeric" min="3" max="60" step="1" value="15"></div>' +
+      '<div class="field"><div class="lab"><label for="il-fresh">Stocks each strategy holds</label></div><select id="il-fresh"><option value="follow" selected>Follow exit rank and stop-loss (your Picks settings)</option><option value="fresh">Its fresh top stocks at month-end</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="il-bw">How alike a past month must be (0.1 strict to 3 loose)</label></div><input id="il-bw" type="number" inputmode="decimal" min="0.1" max="3" step="0.1" value="0.6"></div>' +
+      '<div class="field"><div class="lab"><label for="il-hl">Older months count half after (months)</label></div><input id="il-hl" type="number" inputmode="numeric" min="6" max="240" step="6" value="240"></div>' +
+      '</div><div class="field"><div class="lab"><span>Signals that describe the market</span></div>' + sig + '<p class="note">Default is the list’s last 3 months only. Add breadth, price trend, volume or RSI to describe the market more closely, then compare on your dates.</p></div>' +
+      '<div class="row"><button type="button" class="btn" id="il-run">Run ingredient learning</button></div><div id="il-out" class="out"></div></div><div class="out" id="out-il"></div>';
+    dl.parentNode.insertBefore(s, dl);
+    ['input', 'change'].forEach(function (t) { s.addEventListener(t, function (e) { e.stopPropagation(); }); });
+    el('il-run').addEventListener('click', runIL);
+    window.COMPUTE = window.COMPUTE || {}; window.RENDER = window.RENDER || {};
+    COMPUTE.il = function () { return {}; }; RENDER.il = function () { return ''; };
+    var st = window.setTab;
+    window.setTab = function (t) { st(t); var r = el('range'); if (r) r.hidden = (t === 'pk' || t === 'bl' || t === 'ms' || t === 'il'); };
+  }
+
   mountBlend();
   mountMS();
+  mountIL();
 })();
 
 /* ===== Monthly strategy advisor: price, volume, indicators, 8 ingredients ===== */
