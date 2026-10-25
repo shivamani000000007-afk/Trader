@@ -2920,13 +2920,14 @@ var VOL = {};
     return { V: V, cashW: cashW, cnt: cnt };
   }
   /* turn the votes into the money split under a rule */
+  var MS_OMIN = 0;
   function msRule(vt, rule, K) {
     var arr = Object.keys(vt.V).map(function (k) { return vt.V[k]; }), out = [], tot;
     arr.sort(function (a, b) { return b.votes - a.votes || b.w - a.w || (a.name < b.name ? -1 : 1); });
     if (rule === 'equal') { arr.forEach(function (d) { out.push({ d: d, w: d.w }); }); }
     else if (rule === 'topk') { arr.slice(0, K).forEach(function (d) { out.push({ d: d, w: 1 }); }); }
     else if (rule === 'votek') { arr.slice(0, K).forEach(function (d) { out.push({ d: d, w: d.votes }); }); }
-    else if (rule === 'overlap') { var need = Math.max(2, Math.ceil(vt.cnt / 2)), sel = arr.filter(function (d) { return d.votes >= need; }); if (sel.length < 3) sel = arr.slice(0, 3); sel.forEach(function (d) { out.push({ d: d, w: 1 }); }); }
+    else if (rule === 'overlap') { var need = MS_OMIN > 0 ? Math.min(MS_OMIN, vt.cnt) : Math.max(2, Math.ceil(vt.cnt / 2)), sel = arr.filter(function (d) { return d.votes >= need; }); if (sel.length < 3) sel = arr.slice(0, 3); sel.forEach(function (d) { out.push({ d: d, w: 1 }); }); }
     tot = out.reduce(function (a, x) { return a + x.w; }, 0);
     var inv = rule === 'equal' ? 1 - vt.cashW : 1;
     out.forEach(function (x) { x.w = tot > 0 ? x.w / tot * inv : 0; });
@@ -3134,7 +3135,7 @@ var VOL = {};
         }
         d += '<h3>Strategies picked</h3>' + tb(['#', 'Strategy', 'Filter', 'Beat list in similar months'], pk0.ix.map(function (jj, i) { var r = C.recs[jj]; return '<tr class="pick" tabindex="0" data-fw="' + fw(r) + '"><th>' + (i + 1) + '</th><td class="wrap">' + esc(r.name) + '</td><td>' + (r.filt ? 'ON' : 'OFF') + '</td><td>' + pc(pk0.hit[jj], 0) + '</td></tr>'; }));
         /* stocks */
-        var prevSp = null; if (t0 - 1 >= MIN_T) { var pkp = msPick(C, F, t0 - 1, opt); if (pkp) prevSp = msRule(msVotes(C, pkp.ix, t0 - 1, opt, null), rule, K); }
+        var prevSp = null; if (t0 - 1 >= MIN_T) { var pkp = msPick(C, F, t0 - 1, opt); if (pkp) prevSp = combo(t0 - 1, pkp.ix, null); }
         var prevNames = prevSp ? prevSp.map(function (x) { return x.d.name; }) : [], curNames = sp0.map(function (x) { return x.d.name; });
         d += '<h3>Stocks to hold (' + sp0.length + ')</h3>';
         d += tb(['Stock', 'Strategies holding it (of ' + opt.cnt + ')', 'Share of your money', 'Status'].concat(t0 < T ? ['Result in ' + lab(t0)] : []), sp0.map(function (x) {
@@ -3203,7 +3204,7 @@ var VOL = {};
   var ILBUSY = false, IL_LAST = null;
   /* ---- same tests as the Split test, run on the ingredient-learning picks ---- */
   async function ilCompare(X) {
-    var C = X.C, P = X.P, G = X.G, lg = X.lg, kF = X.kF, lo = X.lo, hi = X.hi, pmB = X.pmB, VS = X.VS, cnt = X.cnt, mr = X.mr, lab = X.lab, M = X.M, K = X.K, sw = 0.5, say2 = X.say2, pre = X.pre, rankIn = X.rankIn;
+    var RL = X.rl, C = X.C, P = X.P, G = X.G, lg = X.lg, kF = X.kF, lo = X.lo, hi = X.hi, pmB = X.pmB, VS = X.VS, cnt = X.cnt, mr = X.mr, lab = X.lab, M = X.M, K = X.K, sw = 0.5, say2 = X.say2, pre = X.pre, rankIn = X.rankIn;
     var rows = [], tt, i;
     for (tt = lo; tt <= hi; tt++) { var g = gate(lg, tt); if (pmB[tt] && g) rows.push({ t: tt, g: G[tt], pk: pmB[tt].ix, on: g.on, rsi: g.rsi, v: VS && VS.use ? VS.vr[tt] : NaN, l: lg[tt] }); }
     var n = rows.length;
@@ -3218,7 +3219,7 @@ var VOL = {};
     var wrow = function (name, s, bold) { return '<tr' + (bold ? ' class="on"' : '') + '><th class="wrap">' + (bold ? '<b>' + name + '</b>' : name) + '</th><td class="' + tone(s.cagr) + '">' + pc(s.cagr, 1, true) + '</td><td class="' + tone(s.cagr - s.lcagr) + '">' + (s === stL ? '-' : pc(s.cagr - s.lcagr, 1, true)) + '</td><td>' + num(s.mult, 1) + 'x</td><td>' + pc(s.up, 0) + '</td><td>' + (s === stL ? '-' : pc(s.beat, 0)) + '</td><td class="' + tone(s.worst) + '">' + pc(s.worst, 1, true) + '</td><td class="bad">' + pc(s.dd, 1, true) + '</td><td>' + rankIn(s.cagr, lo, hi) + '</td></tr>'; };
     h += tb(['Way to invest', 'Per year', 'Extra per year', 'Total multiple', 'Months up', 'Beat list', 'Worst month', 'Biggest fall', 'Rank of ' + M], [
       wrow('Plain list (equal money in every stock)', stL),
-      wrow('Monthly plan: ' + cnt + ' strategies, ' + K + ' most-voted stocks', stM, true),
+      wrow('Monthly plan: ' + cnt + ' strategies, ' + RL, stM, true),
       wrow('Monthly plan on green, list on red', stMG),
       wrow('One single pick (the learner’s #1)', st1),
       wrow('Split across ' + cnt + ', always', stA),
@@ -3231,7 +3232,7 @@ var VOL = {};
       }));
     };
     var ed = bedge(MR, L, 4000, 11);
-    h += '<h3>Chance of losing and of beating the list</h3>' + mk(SM, 'Monthly plan (' + K + ' most-voted stocks)') + mk(SA, 'Split ' + cnt + ', always');
+    h += '<h3>Chance of losing and of beating the list</h3>' + mk(SM, 'Monthly plan (' + RL + ')') + mk(SA, 'Split ' + cnt + ', always');
     h += tb(['Plain list', 'Lose money (past)', 'Lose money (reshuffled)'], hz.map(function (x) { var a = broll(L, L, x), bb = bboot(L, L, x, 4000, 40 + x); return '<tr><th class="wrap">' + x + (x === 1 ? ' month' : ' months') + '</th><td>' + pc(a.lose, 0) + '</td><td>' + pc(bb.lose, 0) + '</td></tr>'; }));
     h += '<p class="note"><b>Past</b> uses every real run of that many months (they overlap). <b>Reshuffled</b> draws months at random 4,000 times, keeping each month’s result and list together. About ' + num(ed.pos * 100, 0) + ' in 100 reshuffles show a positive average monthly edge for the monthly plan (average ' + pc(ed.mean, 2, true) + ' a month, 90% range ' + pc(ed.lo, 2, true) + ' to ' + pc(ed.hi, 2, true) + ').</p>';
     var half = Math.floor(n / 2), hrow = function (name, S) { var a1 = bstat(S.slice(0, half), L.slice(0, half)), a2 = bstat(S.slice(half), L.slice(half)); return [['Earlier half: ' + lab(rows[0].t) + ' to ' + lab(rows[half - 1].t), a1], ['Later half: ' + lab(rows[half].t) + ' to ' + lab(rows[n - 1].t), a2]].map(function (x) { var s = x[1]; return '<tr><th class="wrap">' + esc(name + ' · ' + x[0]) + '</th><td class="' + tone(s.cagr) + '">' + pc(s.cagr, 1, true) + '</td><td>' + pc(s.lcagr, 1, true) + '</td><td class="' + tone(s.cagr - s.lcagr) + '">' + pc(s.cagr - s.lcagr, 1, true) + '</td><td>' + pc(s.beat, 0) + '</td><td class="bad">' + pc(s.dd, 1, true) + '</td></tr>'; }); };
@@ -3273,6 +3274,17 @@ var VOL = {};
     h += '<p class="note">Stocks held is the average number of stocks. Filled up is how often fewer than 3 stocks qualified so the rule had to add the next most shared ones.</p>';
     var ov1 = ovr[0], ovT = ovr[Math.min(1, ovr.length - 1)];
     h += tb(['Chance over 12 months', 'Lose money (past)', 'Beat list (past)', 'Lose money (reshuffled)', 'Beat list (reshuffled)'], [['Overlap in all ' + cnt, ov1.ser.r], ['Overlap in ' + ovT.m + '+', ovT.ser.r], ['Split across ' + cnt, SA.r], ['Monthly plan', MR]].map(function (x) { var a = broll(x[1], L, 12), bb = bboot(x[1], L, 12, 4000, 77); return '<tr><th class="wrap">' + x[0] + '</th><td class="' + (a.lose > 0.3 ? 'bad' : '') + '">' + pc(a.lose, 0) + '</td><td>' + pc(a.win, 0) + '</td><td class="' + (bb.lose > 0.3 ? 'bad' : '') + '">' + pc(bb.lose, 0) + '</td><td>' + pc(bb.win, 0) + '</td></tr>'; }));
+    /* year by year */
+    (function () {
+      var all5 = ovr[0].ser.r, ov4 = (ovr.filter(function (x) { return x.m === Math.max(2, cnt - 1); })[0] || ovr[Math.min(1, ovr.length - 1)]).ser.r, yrs = [], ymap = {}, i5;
+      for (i5 = 0; i5 < n; i5++) { var yy = lab(rows[i5].t).split(' ')[1]; if (!ymap[yy]) { ymap[yy] = { y: yy, n: 0, L: 1, M: 1, A: 1, B: 1, X: 1 }; yrs.push(ymap[yy]); } var q = ymap[yy]; q.n++; q.L *= 1 + L[i5]; q.M *= 1 + MR[i5]; q.A *= 1 + all5[i5]; q.B *= 1 + ov4[i5]; q.X *= 1 + 0.5 * all5[i5] + 0.5 * ov4[i5]; }
+      var beatM = 0, beatA = 0, beatB = 0, beatX = 0, full = 0;
+      var trs2 = yrs.map(function (q) { var ok = q.n === 12; if (ok) { full++; if (q.M > q.L) beatM++; if (q.A > q.L) beatA++; if (q.B > q.L) beatB++; if (q.X > q.L) beatX++; }
+        var c = function (v) { return '<td class="' + tone(v - 1) + '">' + pc(v - 1, 1, true) + '</td>'; };
+        return '<tr><th>' + esc(q.y) + (ok ? '' : ' (' + q.n + ' months)') + '</th><td class="' + tone(q.L - 1) + '">' + pc(q.L - 1, 1, true) + '</td>' + c(q.M) + c(q.B) + c(q.A) + c(q.X) + '<td class="' + tone(q.M - q.L) + '">' + pc(q.M - q.L, 1, true) + '</td></tr>'; });
+      h += '<h3>Year by year: list against our plans</h3><p class="note">Calendar-year results (months held in that year). The overlap columns use each strategy’s fresh top ' + C.N + ' with equal money and no stop-loss; the mix column is half in each. In the ' + full + ' full years, the monthly plan beat the list in ' + beatM + ', overlap in ' + Math.max(2, cnt - 1) + '+ in ' + beatB + ', overlap in all ' + cnt + ' in ' + beatA + ', and the 50/50 mix in ' + beatX + '.</p>';
+      h += tb(['Year', 'List', 'Monthly plan (your setting)', 'Overlap ' + Math.max(2, cnt - 1) + '+', 'Overlap all ' + cnt, 'Mix 50/50', 'Plan minus list'], trs2);
+    })();
     /* tilt */
     var wSeries = function (p, half2) {
       var r = [], prevW = {}, nsum = 0, i2;
@@ -3313,12 +3325,27 @@ var VOL = {};
       var P = C.P, T = C.T, M = C.M, lg = C.lg, G = C.G, kF = C.kFirst, N = C.N, wts = weightsFor(PK_WM, N), MIN_T = 24, t, j, tt;
       var VS = volSeries(P, kF, T), F = msFeatures(C, VS);
       MS_FRESH = el('il-fresh').value === 'fresh';
+      MS_OMIN = Math.max(0, Math.round(val('il-omin', 0, 0, 40)));
+      var O2 = Math.max(0, Math.round(val('il-o2', 0, 0, 40))), slRule = O2 > 0 ? 'overlap' : 'votek', slFresh = O2 > 0 ? MS_FRESH : false, slOmin = O2 > 0 ? O2 : MS_OMIN;
+      var SLp = Math.min(0.9, Math.max(0, val(O2 > 0 ? 'il-o2p' : 'il-sl', 0, 0, 90) / 100)), MS_OMIN0 = MS_OMIN;
       var kinds = MS_SIG.filter(function (g) { return el('il-s-' + g[0]) && el('il-s-' + g[0]).checked; }).map(function (g) { return g[0]; });
       if (!kinds.length) kinds = ['l3'];
       var yN = Math.min(M, Math.max(2, Math.round(val('il-yn', 5, 2, 40)))), yMin = Math.max(3, Math.round(val('il-ymin', 15, 3, 60)));
       var opt = { kinds: kinds, bw: val('il-bw', 0.6, 0.1, 3), hl: val('il-hl', 240, 6, 240), cnt: Math.min(M, Math.max(2, Math.round(val('il-n', 5, 2, 40)))), score: 'ing', sw: 'eq' };
       var optY = Object.assign({}, opt, { cnt: yN });
       var K = Math.max(3, Math.round(val('il-k', 10, 3, 60))), rule = el('il-rule').value;
+      var combo = function (t, pk, om) {
+        var vc = msVotes(C, pk, t, opt, om), core = msRule(vc, rule, K);
+        if (!(SLp > 0)) return core;
+        var sv = MS_FRESH, vs; MS_FRESH = slFresh; try { vs = msVotes(C, pk, t, opt, om); } finally { MS_FRESH = sv; }
+        MS_OMIN = slOmin; var sl; try { sl = msRule(vs, slRule, K); } finally { MS_OMIN = MS_OMIN0; }
+        var mp = {}, out = [];
+        core.forEach(function (x) { mp[x.d.name] = { d: x.d, w: x.w * (1 - SLp) }; });
+        sl.forEach(function (x) { if (mp[x.d.name]) mp[x.d.name].w += x.w * SLp; else mp[x.d.name] = { d: x.d, w: x.w * SLp }; });
+        Object.keys(mp).forEach(function (k2) { out.push(mp[k2]); });
+        out.sort(function (a, b) { return b.w - a.w || (a.d.name < b.d.name ? -1 : 1); });
+        return out;
+      };
       var lab = function (x) { return monthLabel(P, kF + x + 1); }, close = function (x) { return monthLabel(P, kF + x); };
       var nameIx = {}; P.syms.forEach(function (s, i) { nameIx[s] = i; });
       var cm = msReadMonth('il-date'), t0 = isFinite(cm) ? cm - P.lo - kF : T;
@@ -3347,7 +3374,7 @@ var VOL = {};
           d += '<h3>What the tool learned: ingredients of the winners</h3><p class="note">In earlier months with a market like now (' + kinds.map(function (k2) { return MS_SIG.filter(function (g) { return g[0] === k2; })[0][1].toLowerCase(); }).join(', ') + '), the best 10% of the ' + M + ' strategies each month are compared with all strategies. Each number is how many percentage points more (green) or less (red) often than chance the winners had the ingredient positive, negative or absent. The strategies below are the ones whose ingredients match this profile best.</p>' + tb(['Ingredient', 'Positive', 'Negative', 'Absent', 'Verdict'], lrows);
         }
         /* monthly */
-        var om0 = t0 === T ? msOpen(C, pkM.ix, wts) : null, vtM = msVotes(C, pkM.ix, t0, opt, om0), spM = msRule(vtM, rule, K);
+        var om0 = t0 === T ? msOpen(C, pkM.ix, wts) : null, spM = combo(t0, pkM.ix, om0);
         var prevSp = null; if (t0 - 1 >= MIN_T) { var pkp = msPick(C, F, t0 - 1, opt); if (pkp) prevSp = msRule(msVotes(C, pkp.ix, t0 - 1, opt, null), rule, K); }
         var prevNames = prevSp ? prevSp.map(function (x) { return x.d.name; }) : [], curNames = spM.map(function (x) { return x.d.name; });
         d += '<h3>Monthly plan: hold during ' + esc(lab(t0)) + ' (' + spM.length + ' stocks)</h3>';
@@ -3372,11 +3399,15 @@ var VOL = {};
       }
       /* ---------- backtest ---------- */
       say2(warn + d + '<p class="note">Backtesting ' + lab(lo) + ' to ' + lab(hi) + '...</p>'); await tick();
-      var pm = {}, vm = {};
+      var pm = {}, vm = {}, vmS = {};
       var optB = Object.assign({}, opt, { cnt: Math.min(M, 40) }), pmB = {};
-      for (tt = lo; tt <= hi; tt++) { pmB[tt] = msPick(C, F, tt, optB); if (pmB[tt]) { pm[tt] = Object.assign({}, pmB[tt], { ix: pmB[tt].ix.slice(0, opt.cnt) }); vm[tt] = msVotes(C, pm[tt].ix, tt, opt, null); } if (tt % 12 === 0) await tick(); }
-      var mr = [], prevW = {}, L = [];
-      for (tt = lo; tt <= hi; tt++) { var mm = pm[tt] ? msMonthRet(C, vm[tt], rule, K, tt, nameIx, prevW) : { r: lg[tt], w: {} }; mr.push(mm.r); L.push(lg[tt]); prevW = mm.w; }
+      for (tt = lo; tt <= hi; tt++) { pmB[tt] = msPick(C, F, tt, optB); if (pmB[tt]) { pm[tt] = Object.assign({}, pmB[tt], { ix: pmB[tt].ix.slice(0, opt.cnt) }); vm[tt] = msVotes(C, pm[tt].ix, tt, opt, null); if (SLp > 0) { var sv2 = MS_FRESH; MS_FRESH = slFresh; try { vmS[tt] = msVotes(C, pm[tt].ix, tt, opt, null); } finally { MS_FRESH = sv2; } } } if (tt % 12 === 0) await tick(); }
+      var mr = [], prevW = {}, prevWS = {}, L = [];
+      for (tt = lo; tt <= hi; tt++) {
+        var mm = pm[tt] ? msMonthRet(C, vm[tt], rule, K, tt, nameIx, prevW) : { r: lg[tt], w: {} }, rr = mm.r;
+        if (SLp > 0 && pm[tt]) { MS_OMIN = slOmin; var ms2; try { ms2 = msMonthRet(C, vmS[tt], slRule, K, tt, nameIx, prevWS); } finally { MS_OMIN = MS_OMIN0; } rr = (1 - SLp) * mm.r + SLp * ms2.r; prevWS = ms2.w; }
+        mr.push(rr); L.push(lg[tt]); prevW = mm.w;
+      }
       if (hi - lo < 11) {
         var sh = '<h2>Short test: ' + esc(lab(lo)) + (hi > lo ? ' to ' + esc(lab(hi)) : '') + ' (' + mr.length + ' month' + (mr.length > 1 ? 's' : '') + ')</h2><p class="note">Each month was decided at the close of the month before, using only earlier months. A window under 12 months is shown month by month, because yearly growth figures need at least a year.</p>';
         var srows = [], si, sg2 = 1, sl2 = 1;
@@ -3389,7 +3420,7 @@ var VOL = {};
         if (mr.length > 1) sh += '<p class="headline">All ' + mr.length + ' months together: monthly plan <b class="' + tone(sg2 - sl2) + '">' + pc(sg2 - 1, 1, true) + '</b>, plain list ' + pc(sl2 - 1, 1, true) + '.</p>';
         for (si = 0; si < Math.min(mr.length, 6); si++) {
           var tq2 = lo + si; if (!pm[tq2]) continue;
-          var sp2 = msRule(vm[tq2], rule, K);
+          var sp2 = combo(tq2, pm[tq2].ix, null);
           sh += '<h3>Stocks for ' + esc(lab(tq2)) + ' (decided at the close of ' + esc(close(tq2)) + ')</h3>' + tb(['Stock', 'Strategies holding it (of ' + opt.cnt + ')', 'Share of the money', 'Result in ' + lab(tq2)], sp2.map(function (x) { var f2 = msStockRet(P, nameIx, x.d, kF + tq2, PK_OPT.sl); return '<tr><th class="wrap">' + esc(x.d.name) + '</th><td>' + x.d.votes + '</td><td>' + (x.w * 100).toFixed(1) + '%</td><td class="' + tone(f2) + '">' + (isFinite(f2) ? pc(f2, 1, true) : 'n/a') + '</td></tr>'; }));
         }
         if (mr.length > 6) sh += '<p class="note">Stock lists are shown for the first 6 months only.</p>';
@@ -3404,10 +3435,10 @@ var VOL = {};
       var hd = ['Way to invest', 'Per year', 'Total multiple', 'Months up', 'Beat list', 'Biggest fall', 'Rank of ' + M];
       h += '<h2>Backtest ' + esc(lab(lo)) + ' to ' + esc(lab(hi)) + ' (' + mr.length + ' months)</h2><p class="note">Every month uses only earlier months. Strategies and stocks follow your Picks settings (stop-loss ' + PK_OPT.sl + '%, exit rank ' + (C.ex || 'off') + ', ' + N + ' stocks each). Costs are charged on every change.</p>';
       var sM = bstat(mr, L);
-      h += '<h3>Monthly plan alone</h3><p class="headline">Grew <b class="' + tone(sM.cagr - sM.lcagr) + '">' + pc(sM.cagr, 1) + '</b> a year, against ' + pc(sM.lcagr, 1) + ' for the plain list; rank <b>' + rankIn(sM.cagr, lo, hi) + '</b> among the ' + M + ' fixed strategies over the same months.</p>' + tb(hd, [row('Plain list', L, L, lo, hi), row('Monthly plan (' + opt.cnt + ' strategies, ' + K + ' stocks)', mr, L, lo, hi, true)]);
+      h += '<h3>Monthly plan alone</h3><p class="headline">Grew <b class="' + tone(sM.cagr - sM.lcagr) + '">' + pc(sM.cagr, 1) + '</b> a year, against ' + pc(sM.lcagr, 1) + ' for the plain list; rank <b>' + rankIn(sM.cagr, lo, hi) + '</b> among the ' + M + ' fixed strategies over the same months.</p>' + tb(hd, [row('Plain list', L, L, lo, hi), row('Monthly plan (' + opt.cnt + ' strategies, ' + (rule === 'overlap' ? 'overlap in ' + (MS_OMIN > 0 ? MS_OMIN : Math.ceil(opt.cnt / 2)) + '+' : K + ' stocks') + ')', mr, L, lo, hi, true)]);
       var hf = Math.floor(mr.length / 2), a1 = bstat(mr.slice(0, hf), L.slice(0, hf)), a2 = bstat(mr.slice(hf), L.slice(hf));
       h += tb(['Period', 'Monthly plan per year', 'List per year', 'Beat list', 'Rank of ' + M], [['Earlier half: ' + lab(lo) + ' to ' + lab(lo + hf - 1), a1, lo, lo + hf - 1], ['Later half: ' + lab(lo + hf) + ' to ' + lab(hi), a2, lo + hf, hi]].map(function (z) { return '<tr><th class="wrap">' + esc(z[0]) + '</th><td class="' + tone(z[1].cagr) + '">' + pc(z[1].cagr, 1, true) + '</td><td>' + pc(z[1].lcagr, 1, true) + '</td><td>' + pc(z[1].beat, 0) + '</td><td>' + rankIn(z[1].cagr, z[2], z[3]) + '</td></tr>'; }));
-      h += await ilCompare({ C: C, P: P, G: G, lg: lg, kF: kF, lo: lo, hi: hi, pmB: pmB, VS: VS, cnt: opt.cnt, mr: mr, lab: lab, M: M, K: K, say2: say2, pre: warn + d, rankIn: rankIn });
+      h += await ilCompare({ C: C, P: P, G: G, lg: lg, kF: kF, lo: lo, hi: hi, pmB: pmB, VS: VS, cnt: opt.cnt, mr: mr, lab: lab, M: M, K: K, say2: say2, pre: warn + d, rankIn: rankIn, rl: (SLp > 0 ? Math.round((1 - SLp) * 100) + '% in ' : '') + (rule === 'overlap' ? 'stocks held by at least ' + (MS_OMIN > 0 ? MS_OMIN : Math.ceil(opt.cnt / 2)) + ' of ' + opt.cnt : K + ' most-voted stocks') + (SLp > 0 ? (O2 > 0 ? ', ' + Math.round(SLp * 100) + '% in overlap of ' + O2 + '+' : ', ' + Math.round(SLp * 100) + '% spread over the ' + K + ' most-voted (exit rank)') : '') });
       /* yearly and 50-50 */
       if (fr < 0 || hi - fr < 11) h += '<h3>Yearly plan and 50-50</h3><p class="note">The backtest window needs a full year after the first yearly buy (the same calendar month as your date, ' + esc(close(t0).split(' ')[0]) + '). Widen the dates.</p>';
       else {
@@ -3504,10 +3535,14 @@ var VOL = {};
       '<div class="field"><div class="lab"><label for="il-to">Backtest to month (blank = latest)</label></div><input id="il-to" type="month"></div>' +
       '<div class="field"><div class="lab"><label for="il-n">Monthly plan: strategies (2 to 40)</label></div><input id="il-n" type="number" inputmode="numeric" min="2" max="40" step="1" value="5"></div>' +
       '<div class="field"><div class="lab"><label for="il-k">Monthly plan: stocks to hold (3 to 60)</label></div><input id="il-k" type="number" inputmode="numeric" min="3" max="60" step="1" value="10"></div>' +
-      '<div class="field"><div class="lab"><label for="il-rule">Monthly plan: money between stocks</label></div><select id="il-rule"><option value="votek" selected>In proportion to votes</option><option value="topk">Equal in each stock</option><option value="overlap">Overlap: only stocks held by half or more</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="il-rule">Monthly plan: money between stocks</label></div><select id="il-rule"><option value="votek">In proportion to votes</option><option value="topk">Equal in each stock</option><option value="overlap" selected>Overlap: only stocks held by enough strategies (set below)</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="il-omin">Overlap rule: minimum strategies holding a stock (0 = half)</label></div><input id="il-omin" type="number" inputmode="numeric" min="0" max="40" step="1" value="4"></div>' +
+      '<div class="field"><div class="lab"><label for="il-sl">Spread sleeve: % of the monthly money in the most-voted stocks, kept with your exit rank (0 = none)</label></div><input id="il-sl" type="number" inputmode="numeric" min="0" max="90" step="5" value="0"></div>' +
+      '<div class="field"><div class="lab"><label for="il-o2">Second overlap level: minimum strategies (0 = off; replaces the spread sleeve)</label></div><input id="il-o2" type="number" inputmode="numeric" min="0" max="40" step="1" value="0"></div>' +
+      '<div class="field"><div class="lab"><label for="il-o2p">Second overlap level: % of the monthly money in it</label></div><input id="il-o2p" type="number" inputmode="numeric" min="0" max="90" step="5" value="50"></div>' +
       '<div class="field"><div class="lab"><label for="il-yn">Yearly plan: strategies (2 to 40)</label></div><input id="il-yn" type="number" inputmode="numeric" min="2" max="40" step="1" value="5"></div>' +
       '<div class="field"><div class="lab"><label for="il-ymin">Yearly plan: minimum stocks (3 to 60)</label></div><input id="il-ymin" type="number" inputmode="numeric" min="3" max="60" step="1" value="15"></div>' +
-      '<div class="field"><div class="lab"><label for="il-fresh">Stocks each strategy holds</label></div><select id="il-fresh"><option value="follow" selected>Follow exit rank and stop-loss (your Picks settings)</option><option value="fresh">Its fresh top stocks at month-end</option></select></div>' +
+      '<div class="field"><div class="lab"><label for="il-fresh">Stocks each strategy holds</label></div><select id="il-fresh"><option value="follow">Follow exit rank and stop-loss (your Picks settings)</option><option value="fresh" selected>Its fresh top stocks at month-end</option></select></div>' +
       '<div class="field"><div class="lab"><label for="il-bw">How alike a past month must be (0.1 strict to 3 loose)</label></div><input id="il-bw" type="number" inputmode="decimal" min="0.1" max="3" step="0.1" value="0.6"></div>' +
       '<div class="field"><div class="lab"><label for="il-hl">Older months count half after (months)</label></div><input id="il-hl" type="number" inputmode="numeric" min="6" max="240" step="6" value="240"></div>' +
       '</div><div class="field"><div class="lab"><span>Signals that describe the market</span></div>' + sig + '<p class="note">Default is the list’s last 3 months only. Add breadth, price trend, volume or RSI to describe the market more closely, then compare on your dates.</p></div>' +
